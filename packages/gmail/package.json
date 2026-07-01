@@ -1,0 +1,54 @@
+{
+  "name": "@mail-control/gmail",
+  "version": "0.1.0",
+  "description": "Effect-based Gmail API client for sending and listing emails",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./package.json": "./package.json",
+    ".": "./src/index.ts"
+  },
+  "publishConfig": {
+    "exports": {
+      "./package.json": "./package.json",
+      ".": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src/**",
+    "dist/**"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "check": "biome check .",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform-node": "catalog:",
+    "effect": "catalog:",
+    "googleapis": "^170.1.0",
+    "google-auth-library": "^10.5.0"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "25.1.0",
+    "typescript": "catalog:",
+    "vitest": "4.0.18"
+  },
+  "keywords": [
+    "gmail",
+    "effect",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kitlangton/mail-control.git",
+    "directory": "packages/gmail"
+  }
+}

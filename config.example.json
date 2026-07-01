@@ -1,0 +1,16 @@
+{
+  "accounts": {
+    "personal": {
+      "type": "gmail"
+    },
+    "work": {
+      "type": "gmail",
+      "credentialsPath": "~/.mail-control/work-credentials.json",
+      "tokenPath": "~/.mail-control/work-token.json"
+    },
+    "icloud": {
+      "type": "icloud",
+      "email": "you@icloud.com"
+    }
+  }
+}

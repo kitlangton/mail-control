@@ -1,0 +1,66 @@
+{
+  "name": "@mail-control/cli",
+  "version": "0.1.0",
+  "description": "Unified mail CLI for Gmail + iCloud built on Effect",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./package.json": "./package.json",
+    ".": "./src/index.ts"
+  },
+  "publishConfig": {
+    "exports": {
+      "./package.json": "./package.json",
+      ".": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src/**",
+    "dist/**",
+    "bin/**"
+  ],
+  "bin": {
+    "mail": "./bin/mail",
+    "mail-control": "./bin/mail"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "check": "biome check .",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform-node": "catalog:",
+    "@mail-control/gmail": "workspace:*",
+    "@types/mime-types": "^3.0.1",
+    "@types/nodemailer": "^7.0.9",
+    "effect": "catalog:",
+    "imapflow": "^1.2.8",
+    "mime-types": "^3.0.2",
+    "nodemailer": "^7.0.13"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "25.1.0",
+    "typescript": "catalog:",
+    "vitest": "4.0.18"
+  },
+  "keywords": [
+    "mail",
+    "icloud",
+    "gmail",
+    "cli",
+    "effect",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kitlangton/mail-control.git",
+    "directory": "packages/cli"
+  }
+}

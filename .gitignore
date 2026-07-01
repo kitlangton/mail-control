@@ -1,0 +1,20 @@
+node_modules
+dist
+coverage
+.turbo
+.vite
+*.tsbuildinfo
+.env
+.env.*
+.DS_Store
+
+# Local OAuth credentials and tokens. Prefer ~/.mail-control for day-to-day use.
+google-credentials*.json
+gmail-token*.json
+packages/gmail/google-credentials*.json
+packages/gmail/gmail-token*.json
+
+# Local account config and secrets (belong in ~/.mail-control, never committed).
+# config.example.json is intentionally tracked.
+/config.json
+/secrets.json
