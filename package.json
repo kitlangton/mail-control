@@ -8,9 +8,7 @@
     "test": "turbo run test:run",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "mail": "bun run packages/cli/bin/mail",
-    "mail:local": "bun --env-file=.env.local run packages/cli/bin/mail",
-    "gmail:auth": "bun run packages/gmail/src/auth-setup.ts"
+    "mail": "bun run packages/cli/bin/mail"
   },
   "packageManager": "bun@1.3.0",
   "devDependencies": {

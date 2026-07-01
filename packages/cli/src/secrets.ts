@@ -19,6 +19,29 @@ export const SecretsFile = Schema.Struct({
 })
 export type SecretsFile = Schema.Schema.Type<typeof SecretsFile>
 
+/** Merge an account's app password into `secrets.json`, writing it `0600`. */
+export const writeAppPassword = (
+  dir: string,
+  accountId: string,
+  appPassword: string,
+): Effect.Effect<string, MailConfigError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const secretsPath = path.join(dir, "secrets.json")
+    const exists = yield* fs.exists(secretsPath).pipe(Effect.orElseSucceed(() => false))
+    const existing = exists
+      ? yield* readJsonFile(secretsPath, SecretsFile, "secrets")
+      : ({ accounts: {} } satisfies SecretsFile)
+
+    const next: SecretsFile = {
+      accounts: { ...existing.accounts, [accountId]: { ...existing.accounts?.[accountId], appPassword } },
+    }
+    yield* fs
+      .writeFileString(secretsPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
+      .pipe(Effect.mapError(mailConfigError(`Failed to write ${secretsPath}`)))
+    return secretsPath
+  })
+
 /** The env var consulted for an account's app password (override or derived). */
 export const appPasswordEnvVar = (account: ResolvedAccount): string =>
   account.config.type === "icloud" && account.config.appPasswordEnv !== undefined

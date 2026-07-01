@@ -5,6 +5,7 @@ import process from "node:process"
 import readline from "node:readline/promises"
 import { Config, Console, Context, Effect, Layer, Option, Redacted } from "effect"
 import { type gmail_v1, google } from "googleapis"
+import { GMAIL_SCOPES } from "./auth.js"
 import { defaultGmailCredentialsPath, defaultGmailTokenPath } from "./paths.js"
 import type {
   CreateDraftInput,
@@ -19,11 +20,7 @@ import type {
 } from "./types.js"
 import { GmailAuthError, GmailConfigError, GmailError } from "./types.js"
 
-const DEFAULT_SCOPES = [
-  "https://www.googleapis.com/auth/gmail.send",
-  "https://www.googleapis.com/auth/gmail.modify",
-  "https://www.googleapis.com/auth/gmail.compose",
-]
+const DEFAULT_SCOPES = [...GMAIL_SCOPES]
 type GmailOAuth2Client = InstanceType<typeof google.auth.OAuth2>
 type OAuth2Credentials = GmailOAuth2Client["credentials"]
 

@@ -46,7 +46,8 @@ const TYPE_CAPABILITIES: Record<AccountType, ReadonlySet<MailCapability>> = {
   icloud: new Set(["read", "send", "archive", "trash"]),
 }
 
-const gmailInstanceConfig = (id: AccountId, config: GmailAccountConfig, dir: string): GmailInstanceConfig => ({
+/** Resolve an account's Gmail credential + token paths (config overrides, else derived from id). */
+export const gmailAccountPaths = (id: AccountId, config: GmailAccountConfig, dir: string): GmailInstanceConfig => ({
   credentialsPath: expandHome(config.credentialsPath ?? path.join(dir, `${id}-credentials.json`)),
   tokenPath: expandHome(config.tokenPath ?? path.join(dir, `${id}-token.json`)),
 })
@@ -56,8 +57,8 @@ const acquireMailService = (account: ResolvedAccount): Effect.Effect<MailService
     const config = account.config
     if (config.type === "gmail") {
       const accounts = yield* Accounts
-      const gmail = yield* makeGmailService(gmailInstanceConfig(account.id, config, accounts.dir)).pipe(
-        Effect.mapError(mailError(`Failed to initialize account "${account.id}"`)),
+      const gmail = yield* makeGmailService(gmailAccountPaths(account.id, config, accounts.dir)).pipe(
+        Effect.mapError(mailError(`Could not initialize account "${account.id}" — run: mail auth ${account.id}`)),
       )
       return makeGmailMailService(account.id, gmail)
     }

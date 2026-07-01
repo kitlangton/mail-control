@@ -31,8 +31,9 @@ directory with `MAIL_CONTROL_DIR`). Each account has an id (the map key) and a
 Do not print credential, token, or password contents.
 
 - `config.json` holds identity only (safe to share). Secrets never live there.
-- Gmail uses OAuth credential + token JSON files, referenced per account by `credentialsPath` / `tokenPath` (default `~/.mail-control/<id>-credentials.json` and `<id>-token.json`). Set up with `bun run gmail:auth` (point it at an account's files via `GOOGLE_CLIENT_SECRET_PATH` / `GOOGLE_TOKEN_PATH`).
-- iCloud uses an app-specific password, resolved from `MAIL_<ID>_APP_PASSWORD` (or the account's `appPasswordEnv`) and then `~/.mail-control/secrets.json` (0600).
+- Run `mail accounts` to see, per account, whether it is `ready` or what setup it still needs.
+- Run `mail auth <id>` to set an account up: for Gmail it runs the OAuth browser flow (or `--manual` for headless) after guiding credential creation; for iCloud it prompts for the app-specific password and writes `~/.mail-control/secrets.json` (0600). Both verify by reading one message.
+- Under the hood: Gmail uses OAuth credential + token JSON (`credentialsPath` / `tokenPath`, default `~/.mail-control/<id>-credentials.json` and `<id>-token.json`); iCloud resolves its password from `MAIL_<ID>_APP_PASSWORD` (or the account's `appPasswordEnv`) then `secrets.json`.
 
 ## Workflows
 

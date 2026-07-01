@@ -54,6 +54,14 @@ For a Gmail account, `credentialsPath` / `tokenPath` default to
 `~/.mail-control/<id>-credentials.json` and `~/.mail-control/<id>-token.json`;
 override them to point at existing files.
 
+Then authorize each account with `mail auth <id>` and check setup at any time with
+`mail accounts`:
+
+```bash
+mail accounts          # per-account: ready, or what's still needed
+mail auth personal     # walks you through Gmail OAuth / iCloud password
+```
+
 ## Credentials & secrets
 
 **Rule of thumb: `config.json` is identity (safe to share); secrets live
@@ -66,40 +74,36 @@ forced to use environment variables:
 
 ### Gmail
 
-Gmail uses OAuth. Create an OAuth **Desktop** client in Google Cloud, download the
-client secret JSON, and save it to the `credentialsPath` for the account. Then run
-the one-time browser flow, which writes the token to `tokenPath`:
+Gmail uses OAuth, and `mail auth <id>` runs the whole flow:
 
-```bash
-# primary account (defaults to ~/.mail-control/google-credentials.json)
-bun run gmail:auth
+1. Create an OAuth **Desktop** client in Google Cloud and download the client
+   secret JSON. Running `mail auth <id>` *before* that file exists prints the
+   exact console steps and the path to save it to.
+2. Run `mail auth <id>` — it opens your browser, captures the grant, writes the
+   token to the account's `tokenPath`, and verifies by reading one message.
 
-# a named account: point the setup at that account's files
-GOOGLE_CLIENT_SECRET_PATH=~/.mail-control/work-credentials.json \
-GOOGLE_TOKEN_PATH=~/.mail-control/work-token.json \
-  bun run gmail:auth
-```
+On a headless machine (no browser), use `mail auth <id> --manual` to print a URL
+and paste the resulting code.
 
 ### iCloud
 
 iCloud uses an [app-specific password](https://support.apple.com/en-us/102654).
-Provide it either way:
+The easiest path is:
 
 ```bash
-# option A: environment variable (derived name: MAIL_<ID>_APP_PASSWORD)
-export MAIL_ICLOUD_APP_PASSWORD="abcd-efgh-ijkl-mnop"
+mail auth <id>     # prompts (hidden) and writes secrets.json (0600), then verifies
 ```
+
+On a headless machine, pipe it instead: `printf '%s' "$APP_PW" | mail auth <id>`.
+
+You can also provide it without the command — via the `MAIL_<ID>_APP_PASSWORD`
+environment variable (override the name per account with `"appPasswordEnv"`), or a
+`~/.mail-control/secrets.json` entry (`0600`):
 
 ```jsonc
-// option B: ~/.mail-control/secrets.json  (chmod 600)
-{
-  "accounts": {
-    "icloud": { "appPassword": "abcd-efgh-ijkl-mnop" }
-  }
-}
+{ "accounts": { "icloud": { "appPassword": "abcd-efgh-ijkl-mnop" } } }
 ```
 
-Override the env var name per account with `"appPasswordEnv"` in `config.json`.
 IMAP/SMTP hosts default to iCloud's and can be overridden per account
 (`imapHost`, `imapPort`, `imapSecure`, `smtpHost`, `smtpPort`, `smtpSecure`,
 `mailbox`).
@@ -107,6 +111,11 @@ IMAP/SMTP hosts default to iCloud's and can be overridden per account
 ## Commands
 
 ```bash
+# Set up
+mail accounts               # list configured accounts and their setup status
+mail auth <id>              # authorize an account (Gmail OAuth / iCloud password)
+mail auth <id> --manual     # headless: paste a code instead of opening a browser
+
 # Read
 mail list    [-a <id>|all] [--unread|--read] [-q query] [--max N] [--mailbox M]
 mail search  [-a <id>|all] <query> [--max N]        # searches beyond the inbox

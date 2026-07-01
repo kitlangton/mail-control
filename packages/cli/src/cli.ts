@@ -1,7 +1,8 @@
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Console, Effect, Layer, Option } from "effect"
+import { authorizeGmail } from "@mail-control/gmail"
+import { Console, Effect, FileSystem, Layer, Option, Redacted } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
-import type { AccountEnv } from "./account.js"
+import { type AccountEnv, gmailAccountPaths, withAccount } from "./account.js"
 import {
   archiveMessage,
   downloadAttachments,
@@ -16,11 +17,13 @@ import {
   trashMessage,
   unsubscribeFromMessage,
 } from "./app.js"
-import { layer as accountsLayer } from "./config.js"
+import { Accounts, layer as accountsLayer } from "./config.js"
+import { MailError, toMailError } from "./errors.js"
+import { makeICloudService } from "./icloud.js"
 import { printDownloadResult, printJson, printMessage, printSummaries } from "./renderer.js"
-import { layer as secretsLayer } from "./secrets.js"
+import { Secrets, layer as secretsLayer, writeAppPassword } from "./secrets.js"
 import { envLayer } from "./support.js"
-import { MailError, type MailStatus } from "./types.js"
+import type { MailStatus } from "./types.js"
 
 const accountOption = Flag.string("account").pipe(
   Flag.withAlias("a"),
@@ -96,6 +99,68 @@ const resolveStatus = (readFlag: boolean, unreadFlag: boolean): Effect.Effect<Ma
 
 const maxResultsFrom = (max: Option.Option<number>) => Option.getOrElse(max, () => 10)
 const opt = <A>(value: Option.Option<A>) => Option.getOrUndefined(value)
+
+const gmailSetupGuide = (id: string, credentialsPath: string) =>
+  [
+    ``,
+    `Gmail account "${id}" needs OAuth credentials before it can be authorized.`,
+    ``,
+    `  1. Open https://console.cloud.google.com/ and create or select a project.`,
+    `  2. Enable the Gmail API:`,
+    `       https://console.cloud.google.com/apis/library/gmail.googleapis.com`,
+    `  3. Configure the OAuth consent screen (User type: External; add your`,
+    `     Google address under "Test users").`,
+    `  4. Credentials → Create credentials → OAuth client ID →`,
+    `     Application type: "Desktop app".`,
+    `  5. Download the JSON and save it to:`,
+    `       ${credentialsPath}`,
+    `  6. Re-run:  mail auth ${id}`,
+    ``,
+  ].join("\n")
+
+/** Read a secret from the terminal without echoing it. */
+const promptHidden = (prompt: string): Effect.Effect<string, MailError> =>
+  Effect.callback<string, MailError>((resume) => {
+    const stdin = process.stdin
+    process.stdout.write(prompt)
+    const wasRaw = stdin.isRaw ?? false
+    stdin.setRawMode?.(true)
+    stdin.resume()
+    stdin.setEncoding("utf8")
+    let buffer = ""
+    const cleanup = () => {
+      stdin.setRawMode?.(wasRaw)
+      stdin.pause()
+      stdin.removeListener("data", onData)
+    }
+    const onData = (char: string) => {
+      if (char === "\n" || char === "\r" || char === "\u0004") {
+        cleanup()
+        process.stdout.write("\n")
+        resume(Effect.succeed(buffer.trim()))
+      } else if (char === "\u0003") {
+        cleanup()
+        process.stdout.write("\n")
+        resume(Effect.fail(new MailError({ message: "Cancelled" })))
+      } else if (char === "\u007f" || char === "\b") {
+        buffer = buffer.slice(0, -1)
+      } else {
+        buffer += char
+      }
+    }
+    stdin.on("data", onData)
+    return Effect.sync(cleanup)
+  })
+
+/** Read all of piped stdin (for non-interactive `mail auth` on headless machines). */
+const readAllStdin: Effect.Effect<string, MailError> = Effect.tryPromise({
+  try: async () => {
+    const chunks: string[] = []
+    for await (const chunk of process.stdin) chunks.push(String(chunk))
+    return chunks.join("").trim()
+  },
+  catch: (cause) => new MailError({ message: "Failed to read from stdin", cause }),
+})
 
 const listCommand = Command.make(
   "list",
@@ -340,6 +405,90 @@ const trashCommand = mutationCommand("trash", "Moved to trash", trashMessage)
 const markReadCommand = mutationCommand("mark-read", "Marked read", markMessageRead)
 const unsubscribeCommand = mutationCommand("unsubscribe", "Unsubscribed from", unsubscribeFromMessage)
 
+const authCommand = Command.make(
+  "auth",
+  {
+    account: Argument.string("account").pipe(Argument.withDescription("Account id from your config.json")),
+    manual: Flag.boolean("manual").pipe(
+      Flag.withDescription("Headless: print a URL and paste the code instead of opening a browser"),
+    ),
+  },
+  ({ account, manual }) =>
+    Effect.gen(function* () {
+      const accounts = yield* Accounts
+      const resolved = yield* accounts.get(account).pipe(Effect.mapError(toMailError))
+
+      const config = resolved.config
+      if (config.type === "gmail") {
+        const fs = yield* FileSystem.FileSystem
+        const paths = gmailAccountPaths(resolved.id, config, accounts.dir)
+        const hasCredentials = yield* fs.exists(paths.credentialsPath).pipe(Effect.orElseSucceed(() => false))
+        if (!hasCredentials) {
+          yield* Console.log(gmailSetupGuide(resolved.id, paths.credentialsPath))
+          return
+        }
+        yield* authorizeGmail({ credentialsPath: paths.credentialsPath, tokenPath: paths.tokenPath, manual }).pipe(
+          Effect.mapError((cause) => new MailError({ message: `Authorization failed for "${resolved.id}"`, cause })),
+        )
+        yield* Console.log(`Token saved to ${paths.tokenPath}`)
+        // The Gmail service reads the token file fresh, so verify via the normal path.
+        yield* Console.log(`Verifying "${resolved.id}"...`)
+        yield* withAccount(resolved, (mail) => mail.listMessages({ maxResults: 1 }))
+      } else {
+        yield* Console.log(
+          `Create an app-specific password at https://appleid.apple.com (Sign-In and Security → App-Specific Passwords).`,
+        )
+        const password = process.stdin.isTTY
+          ? yield* promptHidden(`App password for "${resolved.id}": `)
+          : yield* readAllStdin
+        if (password.length === 0) {
+          return yield* Effect.fail(new MailError({ message: "No app password provided." }))
+        }
+        const secretsPath = yield* writeAppPassword(accounts.dir, resolved.id, password).pipe(
+          Effect.mapError(toMailError),
+        )
+        yield* Console.log(`Saved app password to ${secretsPath}`)
+        // The Secrets layer cached secrets.json at startup, so verify with the
+        // password just entered rather than the now-stale cached lookup.
+        yield* Console.log(`Verifying "${resolved.id}"...`)
+        yield* makeICloudService(resolved.id, config, Redacted.make(password)).listMessages({ maxResults: 1 })
+      }
+
+      yield* Console.log(`✅ ${resolved.id} is ready`)
+    }),
+)
+
+const accountsCommand = Command.make("accounts", {}, () =>
+  Effect.gen(function* () {
+    const accounts = yield* Accounts
+    if (accounts.all.length === 0) {
+      yield* Console.log("No accounts configured. Create ~/.mail-control/config.json (see config.example.json).")
+      return
+    }
+    const fs = yield* FileSystem.FileSystem
+    const secrets = yield* Secrets
+    for (const account of accounts.all) {
+      const status = yield* Effect.gen(function* () {
+        if (account.config.type === "gmail") {
+          const paths = gmailAccountPaths(account.id, account.config, accounts.dir)
+          const hasCredentials = yield* fs.exists(paths.credentialsPath).pipe(Effect.orElseSucceed(() => false))
+          const hasToken = yield* fs.exists(paths.tokenPath).pipe(Effect.orElseSucceed(() => false))
+          if (hasCredentials && hasToken) return "ready"
+          return hasCredentials
+            ? `needs authorization (run: mail auth ${account.id})`
+            : `needs credentials (run: mail auth ${account.id})`
+        }
+        const hasPassword = yield* secrets.appPassword(account).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        )
+        return hasPassword ? "ready" : `needs app password (run: mail auth ${account.id})`
+      })
+      yield* Console.log(`${account.id.padEnd(14)} ${account.config.type.padEnd(7)} ${status}`)
+    }
+  }),
+)
+
 const root = Command.make("mail", {}).pipe(
   Command.withSubcommands([
     listCommand,
@@ -354,6 +503,8 @@ const root = Command.make("mail", {}).pipe(
     trashCommand,
     markReadCommand,
     unsubscribeCommand,
+    authCommand,
+    accountsCommand,
   ]),
 )
 
@@ -366,7 +517,15 @@ const accounts = accountsLayer.pipe(Layer.provide(platform))
 const secrets = secretsLayer.pipe(Layer.provide(platform), Layer.provide(accounts))
 const configLayer = Layer.mergeAll(platform, accounts, secrets)
 
-export const program = cli(process.argv.slice(2)).pipe(Effect.provide(configLayer))
+// Print expected failures (bad account, missing config/token, provider errors)
+// as a clean one-line message instead of a stack trace.
+const reportFailure = (error: { readonly message: string }) =>
+  Console.error(`mail: ${error.message}`).pipe(Effect.andThen(Effect.sync(() => (process.exitCode = 1))))
+
+export const program = cli(process.argv.slice(2)).pipe(
+  Effect.provide(configLayer),
+  Effect.catchTags({ MailError: reportFailure, MailConfigError: reportFailure }),
+)
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   NodeRuntime.runMain(program)

@@ -32,6 +32,7 @@
  * ```
  */
 
+export { type AuthorizeGmailOptions, authorizeGmail, GMAIL_SCOPES } from "./auth.js"
 export { defaultGmailCredentialsPath, defaultGmailTokenPath } from "./paths.js"
 export {
   GmailConfig,
