@@ -43,7 +43,7 @@ const GMAIL_CAPABILITIES: ReadonlySet<MailCapability> = new Set([
 /** Capabilities are a property of the account *type*, not the account name. */
 const TYPE_CAPABILITIES: Record<AccountType, ReadonlySet<MailCapability>> = {
   gmail: GMAIL_CAPABILITIES,
-  icloud: new Set(["read", "send", "archive", "trash"]),
+  icloud: new Set(["read", "send", "archive", "trash", "unsubscribe"]),
 }
 
 /** Resolve an account's Gmail credential + token paths (config overrides, else derived from id). */

@@ -128,7 +128,7 @@ mail send    -a <id> -t to@x.com -s "Subject" -b "Body" [-A file]
 mail reply   -a <id> <message-id> -b "Body"
 mail forward -a <id> <message-id> -t to@x.com
 
-# Mutate (Gmail; iCloud supports archive/trash)
+# Mutate (Gmail; iCloud supports archive/trash/unsubscribe)
 mail archive     -a <id> <message-id>
 mail trash       -a <id> <message-id>
 mail mark-read   -a <id> <message-id>
@@ -140,7 +140,8 @@ mail unsubscribe -a <id> <message-id>
 machine-readable output. Use `-f/--body-file` for long message bodies.
 
 Capabilities are determined by account **type**: Gmail supports every command;
-iCloud supports read, send, archive, and trash.
+iCloud supports read, send, archive, trash, and unsubscribe (for messages that
+expose standards-based `List-Unsubscribe` headers).
 
 ## Security notes
 

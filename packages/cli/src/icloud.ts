@@ -1,3 +1,4 @@
+import { parseListUnsubscribe } from "@mail-control/gmail"
 import { Effect, Redacted } from "effect"
 import { ImapFlow } from "imapflow"
 import nodemailer from "nodemailer"
@@ -12,12 +13,37 @@ import type {
   SendMailInput,
 } from "./types.js"
 
+export type ICloudUnsubscribeMethod = "one-click" | "mailto"
+
+export interface ICloudUnsubscribeResult {
+  method: ICloudUnsubscribeMethod
+  destination: string
+}
+
 export interface ICloudServiceInterface {
   readonly listMessages: (options?: ListMailOptions) => Effect.Effect<MailMessageSummary[], MailError>
   readonly readMessage: (input: ReadMailInput) => Effect.Effect<MailMessageBody, MailError>
   readonly sendEmail: (input: SendMailInput) => Effect.Effect<void, MailError>
   readonly archiveMessage: (messageId: string) => Effect.Effect<void, MailError>
   readonly trashMessage: (messageId: string) => Effect.Effect<void, MailError>
+  readonly unsubscribeFromMessage: (messageId: string) => Effect.Effect<ICloudUnsubscribeResult, MailError>
+}
+
+/**
+ * Parses a raw RFC 5322 header block (as returned by IMAP `headers` fetch) into
+ * a name → value map, joining folded continuation lines.
+ */
+export const parseRawHeaders = (raw: string): Map<string, string> => {
+  const unfolded = raw.replace(/\r\n[ \t]+/g, " ").split(/\r\n/)
+  const headers = new Map<string, string>()
+  for (const line of unfolded) {
+    const separatorIndex = line.indexOf(":")
+    if (separatorIndex === -1) continue
+    const name = line.slice(0, separatorIndex).trim().toLowerCase()
+    const value = line.slice(separatorIndex + 1).trim()
+    if (name) headers.set(name, value)
+  }
+  return headers
 }
 
 interface ICloudConnection {
@@ -224,5 +250,81 @@ export const makeICloudService = (
   const archiveMessage = (messageId: string) => moveToSpecialUse(messageId, "\\Archive", "Archive", "archive")
   const trashMessage = (messageId: string) => moveToSpecialUse(messageId, "\\Trash", "Trash", "move to trash")
 
-  return { listMessages, readMessage, sendEmail, archiveMessage, trashMessage }
+  const unsubscribeFromMessage = (messageId: string): Effect.Effect<ICloudUnsubscribeResult, MailError> =>
+    withClient((client, mailbox) =>
+      Effect.gen(function* () {
+        const rawHeaders = yield* Effect.tryPromise({
+          try: async () => {
+            await client.mailboxOpen(mailbox)
+            const uid = Number(messageId)
+            const iterator = client.fetch([uid], { headers: ["List-Unsubscribe", "List-Unsubscribe-Post"] })
+            const result = await iterator.next()
+            if (result.done || !result.value) return undefined
+            const message = result.value as { headers?: Buffer }
+            return message.headers?.toString("utf8")
+          },
+          catch: mailError(`Failed to retrieve unsubscribe headers for iCloud message ${messageId}`),
+        })
+
+        if (rawHeaders === undefined) {
+          return yield* Effect.fail(new MailError({ message: `No iCloud message found with id ${messageId}` }))
+        }
+
+        const headers = parseRawHeaders(rawHeaders)
+        const listUnsubscribe = headers.get("list-unsubscribe")
+
+        if (!listUnsubscribe) {
+          return yield* Effect.fail(
+            new MailError({ message: `Message ${messageId} does not provide a List-Unsubscribe header` }),
+          )
+        }
+
+        const destinations = parseListUnsubscribe(listUnsubscribe)
+        const oneClick = headers.get("list-unsubscribe-post")?.toLowerCase().includes("list-unsubscribe=one-click")
+        const httpsDestination = destinations.find((destination) => destination.protocol === "https:")
+
+        if (oneClick && httpsDestination) {
+          yield* Effect.tryPromise({
+            try: async () => {
+              const response = await fetch(httpsDestination, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: "List-Unsubscribe=One-Click",
+                redirect: "follow",
+              })
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status} ${response.statusText}`)
+              }
+            },
+            catch: (cause) =>
+              new MailError({ message: `One-click unsubscribe failed for message ${messageId}`, cause }),
+          })
+          return { method: "one-click", destination: httpsDestination.toString() }
+        }
+
+        const mailtoDestination = destinations.find((destination) => destination.protocol === "mailto:")
+        if (mailtoDestination) {
+          const to = decodeURIComponent(mailtoDestination.pathname)
+          if (!to) {
+            return yield* Effect.fail(
+              new MailError({ message: `Message ${messageId} has an invalid mailto unsubscribe` }),
+            )
+          }
+          yield* sendEmail({
+            to,
+            subject: mailtoDestination.searchParams.get("subject") ?? "unsubscribe",
+            body: mailtoDestination.searchParams.get("body") ?? "unsubscribe",
+          })
+          return { method: "mailto", destination: to }
+        }
+
+        return yield* Effect.fail(
+          new MailError({
+            message: `Message ${messageId} only provides an interactive web unsubscribe; no one-click or mailto option is available`,
+          }),
+        )
+      }),
+    )
+
+  return { listMessages, readMessage, sendEmail, archiveMessage, trashMessage, unsubscribeFromMessage }
 }

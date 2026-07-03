@@ -26,6 +26,7 @@ const makeICloud = (overrides: Partial<ICloudServiceInterface> = {}): ICloudServ
   sendEmail: () => Effect.void,
   archiveMessage: () => Effect.void,
   trashMessage: () => Effect.void,
+  unsubscribeFromMessage: () => Effect.succeed({ method: "one-click", destination: "https://example.com" }),
   ...overrides,
 })
 
@@ -82,5 +83,15 @@ describe("iCloud mail mutations", () => {
 
     expect(archiveMessage).toHaveBeenCalledWith("message-1")
     expect(trashMessage).toHaveBeenCalledWith("message-2")
+  })
+
+  it("delegates unsubscribe and returns the method", async () => {
+    const unsubscribeFromMessage = vi.fn(() =>
+      Effect.succeed({ method: "mailto" as const, destination: "unsubscribe@example.com" }),
+    )
+    const mail = makeICloudMailService(makeICloud({ unsubscribeFromMessage }))
+
+    await expect(Effect.runPromise(mail.unsubscribeFromMessage("message-1"))).resolves.toBe("mailto")
+    expect(unsubscribeFromMessage).toHaveBeenCalledWith("message-1")
   })
 })
