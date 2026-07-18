@@ -885,53 +885,53 @@ export const makeGmailService = (
           return []
         }
 
-        const summaries: GmailMessageSummary[] = []
+        const summaries = yield* Effect.forEach(
+          messages,
+          (message) => {
+            if (!message.id) return Effect.succeed(null)
+            const messageId = message.id
 
-        for (const message of messages) {
-          if (!message.id) continue
-          const messageId = message.id
+            return Effect.tryPromise(() =>
+              gmail.users.messages.get({
+                userId: "me",
+                id: messageId,
+                format: "metadata",
+                metadataHeaders: ["Subject", "From", "Date"],
+              }),
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new GmailError({
+                    message: `Failed to retrieve Gmail message ${messageId}`,
+                    cause,
+                  }),
+              ),
+              Effect.map((detail) => {
+                const headers = detail.data.payload?.headers ?? []
+                const findHeader = (name: string): string | undefined =>
+                  headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? undefined
 
-          const detail = yield* Effect.tryPromise(() =>
-            gmail.users.messages.get({
-              userId: "me",
-              id: messageId,
-              format: "metadata",
-              metadataHeaders: ["Subject", "From", "Date"],
-            }),
-          ).pipe(
-            Effect.mapError(
-              (cause) =>
-                new GmailError({
-                  message: `Failed to retrieve Gmail message ${messageId}`,
-                  cause,
-                }),
-            ),
-          )
+                const summary: GmailMessageSummary = {
+                  id: messageId,
+                  subject: findHeader("Subject") ?? "(no subject)",
+                  from: findHeader("From") ?? "",
+                }
 
-          const headers = detail.data.payload?.headers ?? []
-          const findHeader = (name: string): string | undefined =>
-            headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? undefined
+                const threadId = detail.data.threadId ?? message.threadId
+                if (threadId) summary.threadId = threadId
+                const date = findHeader("Date")
+                if (date) summary.date = date
+                const snippet = detail.data.snippet ?? message.snippet
+                if (snippet) summary.snippet = snippet
+                if (detail.data.labelIds) summary.unread = detail.data.labelIds.includes("UNREAD")
+                return summary
+              }),
+            )
+          },
+          { concurrency: 8 },
+        )
 
-          const summary: GmailMessageSummary = {
-            id: messageId,
-            subject: findHeader("Subject") ?? "(no subject)",
-            from: findHeader("From") ?? "",
-          }
-
-          const threadId = detail.data.threadId ?? message.threadId
-          if (threadId) summary.threadId = threadId
-          const date = findHeader("Date")
-          if (date) summary.date = date
-          const snippet = detail.data.snippet ?? message.snippet
-          if (snippet) summary.snippet = snippet
-          if (detail.data.labelIds) {
-            summary.unread = detail.data.labelIds.includes("UNREAD")
-          }
-
-          summaries.push(summary)
-        }
-
-        return summaries
+        return summaries.filter((summary) => summary !== null)
       })
 
     return {

@@ -9,10 +9,10 @@ Use the local `mail` CLI instead of browser automation when it can complete the 
 
 ## Command Resolution
 
-- Prefer `mail ...` when a global binary is linked.
-- From the repo root, the reliable form is `bun run mail ...` (or `bun packages/cli/bin/mail ...`).
-- If output looks like the system `mail` program, check `which -a mail` and fall back to `bun packages/cli/bin/mail ...` from the repo root.
-- Confirm the current surface with `mail --help` and `mail <subcommand> --help` before relying on remembered flags.
+- Use the globally linked `mail` command. Verify it with `command -v mail` and `mail --help`; the check passes when help lists the `list`, `search`, `send`, and `accounts` subcommands.
+- If `mail` resolves to `/usr/bin/mail` or shows `mail [-dEiInv]`, repair the global link from `packages/cli` with `bun link`, then verify `mail --help` again. A stale `~/.bun/bin/mail` symlink may point to the retired `@hub/mail-cli`; remove that obsolete global package with `bun remove --global @hub/mail-cli` before relinking.
+- Treat `bun run mail ...` as a temporary diagnostic fallback only. Do not leave the environment using the repo-local command when the requested global CLI can be repaired.
+- Confirm subcommand flags with `<resolved-command> <subcommand> --help` before relying on remembered flags.
 
 ## Accounts
 
@@ -92,6 +92,12 @@ mail send -a personal -t recipient@example.com -s "Subject" -b "Body"
 mail send -a personal -t one@example.com -t two@example.com -s "Subject" -f body.txt
 mail send -a personal -t recipient@example.com -s "Subject" -b "Body" -A file.pdf
 ```
+
+Application-managed inbox smoke tests:
+
+1. Resolve the exact recipient from the application's provider configuration or provider API. Do not guess an address from product branding or treat a mailbox search as authoritative.
+2. Send from one concrete configured account with a unique marker and an explicit no-action/no-reply body.
+3. Verify one provider intake by that marker before concluding the mail path works. For cursor-based consumers, establish a new-only baseline first; never rewind a production cursor merely to manufacture a test message.
 
 Replying and forwarding:
 

@@ -14,6 +14,7 @@ mail list -a all --max 20          # every configured inbox at once
 mail search -a work "invoice"      # search one account
 mail recent --since 24h --json     # machine-readable recent mail
 mail send -a personal -t a@b.com -s "Hi" -b "Hello"
+mail tui                            # interactive unified inbox
 ```
 
 ## Install
@@ -23,9 +24,16 @@ bun install
 bun run build
 ```
 
-The CLI entrypoint is `packages/cli/bin/mail`. During development run it with
-`bun run mail ...`; to install a global `mail` shim, link the bin or add a shell
-alias to `bun run --cwd /path/to/mail-control mail`.
+The CLI entrypoint is `packages/cli/bin/mail`. Link it globally from the CLI
+package so `mail` works from every directory:
+
+```bash
+cd packages/cli
+bun link
+mail --help
+```
+
+Use `bun run mail ...` only as a repo-local diagnostic fallback.
 
 ## Configure accounts
 
@@ -115,6 +123,7 @@ IMAP/SMTP hosts default to iCloud's and can be overridden per account
 mail accounts               # list configured accounts and their setup status
 mail auth <id>              # authorize an account (Gmail OAuth / iCloud password)
 mail auth <id> --manual     # headless: paste a code instead of opening a browser
+mail tui                    # launch the interactive terminal inbox
 
 # Read
 mail list    [-a <id>|all] [--unread|--read] [-q query] [--max N] [--mailbox M]
@@ -146,6 +155,9 @@ expose standards-based `List-Unsubscribe` headers).
 ## Security notes
 
 - `config.json` and `secrets.json` are written `0600`.
+- The TUI keeps a private `0600` SQLite cache at `~/.mail-control/cache.sqlite`
+  so mailbox views and opened message bodies restore immediately after restart.
+  Delete that file to clear cached mail. Entries are pruned automatically.
 - Secrets never appear in `config.json`, so it is safe to commit or share.
 - `.env` and credential/token files are gitignored.
 - Tokens and passwords are held as Effect `Redacted` values and never logged.

@@ -184,7 +184,7 @@ export const makeICloudService = (
           try: async () => {
             await client.mailboxOpen(mailbox)
             const uid = Number(input.id)
-            const iterator = client.fetch([uid], { envelope: true, flags: true, bodyParts: ["TEXT"] })
+            const iterator = client.fetch([uid], { envelope: true, flags: true, bodyParts: ["TEXT"] }, { uid: true })
             const result = await iterator.next()
             if (result.done || !result.value) return undefined
 
@@ -257,7 +257,11 @@ export const makeICloudService = (
           try: async () => {
             await client.mailboxOpen(mailbox)
             const uid = Number(messageId)
-            const iterator = client.fetch([uid], { headers: ["List-Unsubscribe", "List-Unsubscribe-Post"] })
+            const iterator = client.fetch(
+              [uid],
+              { headers: ["List-Unsubscribe", "List-Unsubscribe-Post"] },
+              { uid: true },
+            )
             const result = await iterator.next()
             if (result.done || !result.value) return undefined
             const message = result.value as { headers?: Buffer }

@@ -43,6 +43,16 @@ const toMailSummary = (account: AccountId, message: GmailMessageSummary): MailMe
   ...(message.unread !== undefined ? { unread: message.unread } : {}),
 })
 
+const dedupeByThread = (messages: readonly GmailMessageSummary[]): readonly GmailMessageSummary[] => {
+  const seen = new Set<string>()
+  return messages.filter((message) => {
+    const key = message.threadId ?? message.id
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 const toMailBody = (message: GmailMessageBody): MailMessageBody => ({
   id: message.id,
   subject: message.subject,
@@ -82,7 +92,9 @@ export const makeGmailMailService = (account: AccountId, gmail: GmailServiceInte
       }
       const messages = yield* gmail.listMessages(gmailOptions)
 
-      return messages.map((message) => toMailSummary(account, message))
+      return (options?.inboxOnly === false ? messages : dedupeByThread(messages)).map((message) =>
+        toMailSummary(account, message),
+      )
     }).pipe(Effect.mapError(mailError("Failed to list Gmail messages")))
 
   const readMessage = (input: ReadMailInput) =>
@@ -155,5 +167,6 @@ export const makeICloudMailService = (icloud: ICloudServiceInterface) =>
     replyToEmail: () => icloudUnsupported("Reply"),
     downloadAttachments: () => icloudUnsupported("Attachment download"),
     markMessageRead: () => icloudUnsupported("Mark read"),
-    unsubscribeFromMessage: () => icloudUnsupported("Unsubscribe"),
+    unsubscribeFromMessage: (messageId: string) =>
+      icloud.unsubscribeFromMessage(messageId).pipe(Effect.map((result) => result.method)),
   })

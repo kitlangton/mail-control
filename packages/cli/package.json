@@ -35,17 +35,24 @@
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
+    "@effect/sql-sqlite-bun": "4.0.0-beta.90",
     "@mail-control/gmail": "workspace:*",
+    "@opentui/core": "0.4.2",
+    "@opentui/react": "0.4.2",
     "@types/mime-types": "^3.0.1",
     "@types/nodemailer": "^7.0.9",
     "effect": "catalog:",
     "imapflow": "^1.2.8",
     "mime-types": "^3.0.2",
-    "nodemailer": "^7.0.13"
+    "nodemailer": "^7.0.13",
+    "react": "19.2.7",
+    "turndown": "7.2.0"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
     "@types/node": "25.1.0",
+    "@types/react": "19.2.17",
+    "@types/turndown": "5.0.5",
     "typescript": "catalog:",
     "vitest": "4.0.18"
   },

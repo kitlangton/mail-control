@@ -1,6 +1,6 @@
-import { NodeRuntime, NodeServices } from "@effect/platform-node"
+import { NodeRuntime } from "@effect/platform-node"
 import { authorizeGmail } from "@mail-control/gmail"
-import { Console, Effect, FileSystem, Layer, Option, Redacted } from "effect"
+import { Console, Effect, FileSystem, Option, Redacted } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import { type AccountEnv, gmailAccountPaths, withAccount } from "./account.js"
 import {
@@ -17,12 +17,12 @@ import {
   trashMessage,
   unsubscribeFromMessage,
 } from "./app.js"
-import { Accounts, layer as accountsLayer } from "./config.js"
+import { Accounts } from "./config.js"
 import { MailError, toMailError } from "./errors.js"
 import { makeICloudService } from "./icloud.js"
+import { mailLayer } from "./layers.js"
 import { printDownloadResult, printJson, printMessage, printSummaries } from "./renderer.js"
-import { Secrets, layer as secretsLayer, writeAppPassword } from "./secrets.js"
-import { envLayer } from "./support.js"
+import { Secrets, writeAppPassword } from "./secrets.js"
 import type { MailStatus } from "./types.js"
 
 const accountOption = Flag.string("account").pipe(
@@ -489,6 +489,16 @@ const accountsCommand = Command.make("accounts", {}, () =>
   }),
 )
 
+const tuiCommand = Command.make("tui", {}, () =>
+  Effect.tryPromise({
+    try: async () => {
+      const { launchTui } = await import("./tui.js")
+      await launchTui()
+    },
+    catch: (cause) => new MailError({ message: "Failed to launch TUI", cause }),
+  }),
+)
+
 const root = Command.make("mail", {}).pipe(
   Command.withSubcommands([
     listCommand,
@@ -505,6 +515,7 @@ const root = Command.make("mail", {}).pipe(
     unsubscribeCommand,
     authCommand,
     accountsCommand,
+    tuiCommand,
   ]),
 )
 
@@ -512,18 +523,13 @@ const cli = Command.runWith(root, {
   version: "0.2.0",
 })
 
-const platform = Layer.mergeAll(NodeServices.layer, envLayer())
-const accounts = accountsLayer.pipe(Layer.provide(platform))
-const secrets = secretsLayer.pipe(Layer.provide(platform), Layer.provide(accounts))
-const configLayer = Layer.mergeAll(platform, accounts, secrets)
-
 // Print expected failures (bad account, missing config/token, provider errors)
 // as a clean one-line message instead of a stack trace.
 const reportFailure = (error: { readonly message: string }) =>
   Console.error(`mail: ${error.message}`).pipe(Effect.andThen(Effect.sync(() => (process.exitCode = 1))))
 
 export const program = cli(process.argv.slice(2)).pipe(
-  Effect.provide(configLayer),
+  Effect.provide(mailLayer),
   Effect.catchTags({ MailError: reportFailure, MailConfigError: reportFailure }),
 )
 
