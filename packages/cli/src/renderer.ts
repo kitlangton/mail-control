@@ -21,7 +21,12 @@ const formatAccount = (account: AccountId) => blue(`[${account}]`)
 const statusOf = (message: { unread?: boolean }): "read" | "unread" | "unknown" =>
   message.unread === undefined ? "unknown" : message.unread ? "unread" : "read"
 
-export const printJson = (value: unknown) => Console.log(JSON.stringify(value, null, 2))
+// Wait for the write to flush: the runtime exits right after the command, and a
+// piped stdout would otherwise lose everything past the 64 KB pipe buffer.
+export const printJson = (value: unknown) =>
+  Effect.callback<void>((resume) => {
+    process.stdout.write(`${JSON.stringify(value, null, 2)}\n`, () => resume(Effect.void))
+  })
 
 export const printSummaries = (messages: readonly MailMessageSummary[]) =>
   Effect.gen(function* () {
