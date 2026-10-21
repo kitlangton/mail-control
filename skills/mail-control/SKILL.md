@@ -54,6 +54,9 @@ mail read -a icloud --mailbox "Sent Messages" <message-id>
 
 Use `--json` for machine-readable output from `list`, `search`, `recent`, `read`, `download`, and mutation commands. Prefer JSON for scripts instead of parsing pretty terminal output.
 
+JSON and text output drain before exit, including bodies larger than the pipe buffer.
+Expired Gmail authorization reports the account-specific `mail auth <id>` command.
+
 Daily email review:
 
 The goal is inbox zero across all accounts: a clear picture of every inbox, focused on unread mail, with explicit recommendations for what to archive, what to unsubscribe from, and what needs a response. Work across all inboxes at once with `mail list -a all` unless the user narrows the account.

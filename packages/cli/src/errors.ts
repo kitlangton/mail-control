@@ -32,3 +32,29 @@ export const mailConfigError =
 /** Narrow a config failure into a `MailError`, preserving the cause chain. */
 export const toMailError = (cause: MailError | MailConfigError): MailError =>
   cause instanceof MailError ? cause : new MailError({ message: cause.message, cause })
+
+/** Preserve an actionable sign-in hint without printing provider responses or tokens. */
+export const accountFailure = (account: string, error: MailError): MailError => {
+  let cause: unknown = error
+  for (let depth = 0; depth < 8 && typeof cause === "object" && cause !== null; depth++) {
+    const detail = cause as {
+      _tag?: string
+      code?: unknown
+      message?: unknown
+      response?: { status?: number; data?: { error?: unknown } }
+      cause?: unknown
+    }
+    if (
+      detail._tag === "GmailAuthError" ||
+      detail.code === 401 ||
+      detail.code === "invalid_grant" ||
+      detail.response?.status === 401 ||
+      detail.response?.data?.error === "invalid_grant" ||
+      (typeof detail.message === "string" && detail.message.includes("invalid_grant"))
+    ) {
+      return new MailError({ message: `Sign in again: run mail auth ${account}`, cause: error })
+    }
+    cause = detail.cause
+  }
+  return error
+}

@@ -9,7 +9,7 @@ import {
   type GmailAccountConfig,
   type ResolvedAccount,
 } from "./config.js"
-import { MailError, mailError, toMailError } from "./errors.js"
+import { accountFailure, MailError, mailError, toMailError } from "./errors.js"
 import { makeICloudService } from "./icloud.js"
 import { Secrets } from "./secrets.js"
 import { type MailService, makeGmailMailService, makeICloudMailService } from "./service.js"
@@ -94,7 +94,7 @@ export const withAccount = <A, R>(
   Effect.gen(function* () {
     const mail = yield* acquireMailService(account)
     return yield* run(mail)
-  })
+  }).pipe(Effect.mapError((error) => accountFailure(account.id, error)))
 
 /**
  * Resolves an account selection to a configured account, verifying the account

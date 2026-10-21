@@ -4,7 +4,7 @@ import { createServer } from "node:http"
 import path from "node:path"
 import readline from "node:readline/promises"
 import { Console, Effect } from "effect"
-import { google } from "googleapis"
+import * as google from "googleapis/build/src/apis/gmail/index.js"
 import { GmailAuthError, GmailConfigError } from "./types.js"
 
 /** Scope required to read and manage Gmail filters (`users.settings.filters`). */

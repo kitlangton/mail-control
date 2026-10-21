@@ -1,5 +1,6 @@
-import { Console, Effect } from "effect"
+import { Effect } from "effect"
 import type { DownloadResult } from "./app.js"
+import { Console } from "./output.js"
 import { createColorizer } from "./support.js"
 import type { AccountId, MailMessageBody, MailMessageSummary } from "./types.js"
 

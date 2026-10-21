@@ -9,11 +9,12 @@ import {
   type GmailScopeError,
   type GmailServiceInterface,
 } from "@mail-control/gmail"
-import { Console, Effect, Option } from "effect"
+import { Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import { requireAccount, withGmail } from "./account.js"
 import type { Accounts } from "./config.js"
 import { MailError } from "./errors.js"
+import { Console } from "./output.js"
 import { printJson } from "./renderer.js"
 
 export interface FilterOptions {
