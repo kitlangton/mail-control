@@ -159,7 +159,7 @@ const oneLine = (value: string) => value.replace(/[\r\n]+/g, " ")
 const truncate = (value: string, width: number) =>
   value.length <= width ? value : `${value.slice(0, Math.max(0, width - 3))}...`
 
-const markdownSyntaxStyle = SyntaxStyle.fromStyles({
+const markdownStyles = {
   keyword: { fg: parseColor(colors.accent), bold: true },
   string: { fg: parseColor(colors.count) },
   comment: { fg: parseColor(colors.muted), italic: true },
@@ -169,7 +169,7 @@ const markdownSyntaxStyle = SyntaxStyle.fromStyles({
   operator: { fg: parseColor(colors.text) },
   punctuation: { fg: parseColor(colors.text) },
   default: { fg: parseColor(colors.text) },
-})
+}
 
 const accountLabel = (account: string) =>
   ({ all: "All", gmail: "Gmail", anomaly: "Anomaly", vish: "Vish", icloud: "iCloud" })[account] ?? account
@@ -347,6 +347,16 @@ const ShortcutModal = ({
 
 const MailApp = () => {
   const renderer = useRenderer()
+  const markdownSyntaxStyle = useMemo(
+    () => (renderer.nativeScene ? SyntaxStyle.fromStyles(markdownStyles, renderer.nativeScene) : null),
+    [renderer.nativeScene],
+  )
+  useEffect(
+    () => () => {
+      markdownSyntaxStyle?.destroy()
+    },
+    [markdownSyntaxStyle],
+  )
   const { width, height } = useTerminalDimensions()
   const [accounts, setAccounts] = useState<readonly string[]>([])
   const [account, setAccount] = useState("all")
@@ -793,7 +803,7 @@ const MailApp = () => {
           ) : null}
           <Divider width={detailWidth} />
           <scrollbox flexGrow={1} paddingLeft={1} paddingRight={2} focused>
-            {renderedBody?.format === "markdown" ? (
+            {renderedBody?.format === "markdown" && markdownSyntaxStyle ? (
               <markdown
                 content={renderedBody.content || "(No message body)"}
                 syntaxStyle={markdownSyntaxStyle}

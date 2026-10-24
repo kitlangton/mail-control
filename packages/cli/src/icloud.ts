@@ -98,9 +98,9 @@ const formatAddress = (name?: string, address?: string) => {
 }
 
 interface Envelope {
-  subject?: string
-  from?: { name?: string; address?: string }[]
-  date?: Date
+  subject?: string | undefined
+  from?: { name?: string | undefined; address?: string | undefined }[] | undefined
+  date?: Date | string | undefined
 }
 
 /** Shared envelope → display fields, used by both list and read. */
@@ -109,7 +109,9 @@ const envelopeFields = (envelope: Envelope | undefined, flags: Set<string> | und
   return {
     subject: envelope?.subject ?? "(no subject)",
     from: formatAddress(fromEntry?.name, fromEntry?.address),
-    ...(envelope?.date ? { date: envelope.date.toISOString() } : {}),
+    ...(envelope?.date
+      ? { date: typeof envelope.date === "string" ? envelope.date : envelope.date.toISOString() }
+      : {}),
     ...(flags ? { unread: !flags.has("\\Seen") } : {}),
   }
 }

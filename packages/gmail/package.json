@@ -31,14 +31,14 @@
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
-    "googleapis": "^170.1.0",
-    "google-auth-library": "^10.5.0"
+    "googleapis": "^188.0.0",
+    "google-auth-library": "^11.3.1"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
-    "@types/node": "25.1.0",
+    "@types/node": "26.6.5",
     "typescript": "catalog:",
-    "vitest": "4.0.18"
+    "vitest": "5.0.5"
   },
   "keywords": [
     "gmail",
