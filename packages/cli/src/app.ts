@@ -11,7 +11,7 @@ import {
 } from "./compose.js"
 import { Accounts, type ResolvedAccount } from "./config.js"
 import { MailError } from "./errors.js"
-import { combineGmailQuery, isOnOrAfter, parseDuration } from "./time.js"
+import { combineGmailQuery, type DurationWindow, isOnOrAfter, parseDuration } from "./time.js"
 import type { ListMailOptions, MailMessageBody, MailMessageSummary, MailStatus } from "./types.js"
 
 export interface ListInput {
@@ -19,6 +19,7 @@ export interface ListInput {
   readonly maxResults: number
   readonly status: MailStatus
   readonly query?: string
+  readonly since?: DurationWindow
   readonly mailbox?: string
   readonly scope: "inbox" | "search"
 }
@@ -75,11 +76,26 @@ const baseOptionsFrom = (input: ListInput): ListMailOptions => ({
   ...(input.mailbox !== undefined ? { mailbox: input.mailbox } : {}),
 })
 
-/** Gmail broadens beyond the inbox when searching; other types ignore the flag. */
-const optionsFor = (account: ResolvedAccount, base: ListMailOptions, scope: "inbox" | "search"): ListMailOptions => ({
-  ...base,
-  ...(account.config.type === "gmail" && scope === "search" ? { inboxOnly: false } : {}),
-})
+/** Gmail broadens beyond the inbox when searching and uses `newer_than:Xd`; iCloud uses `since: Date`. */
+const optionsFor = (
+  account: ResolvedAccount,
+  base: ListMailOptions,
+  scope: "inbox" | "search",
+  since?: DurationWindow,
+): ListMailOptions => {
+  if (account.config.type === "gmail") {
+    const query = since ? combineGmailQuery(since.gmailNewerThan, base.query) : base.query
+    return {
+      ...base,
+      ...(query !== undefined && query.length > 0 ? { query } : {}),
+      ...(scope === "search" ? { inboxOnly: false } : {}),
+    }
+  }
+  return {
+    ...base,
+    ...(since !== undefined ? { since: since.sinceDate } : {}),
+  }
+}
 
 const listForAccount = (account: ResolvedAccount, options: ListMailOptions) =>
   withAccount(account, (mail) => mail.listMessages(options))
@@ -135,14 +151,17 @@ export const listMessagesReport = (input: ListInput): Effect.Effect<ListReport, 
 
     if (input.account !== "all") {
       const account = yield* requireAccount(input.account, "read", "Listing messages")
-      return { messages: yield* listForAccount(account, optionsFor(account, base, input.scope)), warnings: [] }
+      return {
+        messages: yield* listForAccount(account, optionsFor(account, base, input.scope, input.since)),
+        warnings: [],
+      }
     }
 
     const accounts = yield* Accounts
     const results = yield* Effect.forEach(
       accounts.all,
       (account) =>
-        Effect.exit(listForAccount(account, optionsFor(account, base, input.scope))).pipe(
+        Effect.exit(listForAccount(account, optionsFor(account, base, input.scope, input.since))).pipe(
           Effect.map((exit) => ({ account: account.id, exit })),
         ),
       { concurrency: "unbounded" },
@@ -161,7 +180,8 @@ export const recentMessagesReport = (input: RecentInput): Effect.Effect<ListRepo
       maxResults: input.maxResults,
       status: input.status,
       scope: "search",
-      query: combineGmailQuery(since.gmailNewerThan, input.query),
+      since,
+      ...(input.query !== undefined ? { query: input.query } : {}),
       ...(input.mailbox !== undefined ? { mailbox: input.mailbox } : {}),
     })
 

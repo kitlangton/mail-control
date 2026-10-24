@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { findUnsubscribeUrl, parseRawHeaders } from "../src/icloud.js"
+import { buildSearchCriteria, findUnsubscribeUrl, parseRawHeaders } from "../src/icloud.js"
 
 describe("parseRawHeaders", () => {
   it("parses simple header lines", () => {
@@ -43,5 +43,29 @@ describe("findUnsubscribeUrl", () => {
         "Unsubscribe: https://tracking.example.com/click?token=abc https://example.com/unsubscribe?token=abc",
       ),
     ).toBe("https://example.com/unsubscribe?token=abc")
+  })
+})
+
+describe("buildSearchCriteria", () => {
+  const now = new Date("2026-10-24T12:00:00.000Z")
+
+  it("maps since Date and unread status without polluting subject/from", () => {
+    const since = new Date("2026-10-23T12:00:00.000Z")
+    expect(buildSearchCriteria({ status: "unread", since }, now)).toEqual({
+      seen: false,
+      since,
+    })
+  })
+
+  it("translates Gmail-style from:, subject:, is:unread, and newer_than: operators to IMAP criteria", () => {
+    expect(
+      buildSearchCriteria({ query: 'from:amazon subject:"your order" is:unread newer_than:2d invoice' }, now),
+    ).toEqual({
+      from: "amazon",
+      subject: "your order",
+      seen: false,
+      since: new Date("2026-10-22T12:00:00.000Z"),
+      or: [{ subject: "invoice" }, { from: "invoice" }],
+    })
   })
 })

@@ -31,6 +31,7 @@ const makeICloud = (overrides: Partial<ICloudServiceInterface> = {}): ICloudServ
   sendEmail: () => Effect.void,
   archiveMessage: () => Effect.void,
   trashMessage: () => Effect.void,
+  markMessageRead: () => Effect.void,
   unsubscribeFromMessage: () => Effect.succeed({ method: "one-click", destination: "https://example.com" }),
   ...overrides,
 })
@@ -78,16 +79,19 @@ describe("Gmail mail search", () => {
 })
 
 describe("iCloud mail mutations", () => {
-  it("delegates archive and trash operations", async () => {
+  it("delegates archive, trash, and mark-read operations", async () => {
     const archiveMessage = vi.fn(() => Effect.void)
     const trashMessage = vi.fn(() => Effect.void)
-    const mail = makeICloudMailService(makeICloud({ archiveMessage, trashMessage }))
+    const markMessageRead = vi.fn(() => Effect.void)
+    const mail = makeICloudMailService(makeICloud({ archiveMessage, trashMessage, markMessageRead }))
 
     await Effect.runPromise(mail.archiveMessage("message-1"))
     await Effect.runPromise(mail.trashMessage("message-2"))
+    await Effect.runPromise(mail.markMessageRead("message-3"))
 
     expect(archiveMessage).toHaveBeenCalledWith("message-1")
     expect(trashMessage).toHaveBeenCalledWith("message-2")
+    expect(markMessageRead).toHaveBeenCalledWith("message-3")
   })
 
   it("delegates unsubscribe and returns the method", async () => {

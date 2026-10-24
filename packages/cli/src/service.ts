@@ -38,8 +38,8 @@ const toMailSummary = (account: AccountId, message: GmailMessageSummary): MailMe
   id: message.id,
   subject: message.subject,
   from: message.from,
+  snippet: message.snippet ?? "",
   ...(message.date !== undefined ? { date: message.date } : {}),
-  ...(message.snippet !== undefined ? { snippet: message.snippet } : {}),
   ...(message.unread !== undefined ? { unread: message.unread } : {}),
 })
 
@@ -164,9 +164,9 @@ export const makeICloudMailService = (icloud: ICloudServiceInterface) =>
     sendEmail: icloud.sendEmail,
     archiveMessage: icloud.archiveMessage,
     trashMessage: icloud.trashMessage,
+    markMessageRead: icloud.markMessageRead,
     replyToEmail: () => icloudUnsupported("Reply"),
     downloadAttachments: () => icloudUnsupported("Attachment download"),
-    markMessageRead: () => icloudUnsupported("Mark read"),
     unsubscribeFromMessage: (messageId: string) =>
       icloud.unsubscribeFromMessage(messageId).pipe(Effect.map((result) => result.method)),
   })

@@ -28,6 +28,7 @@ export interface ListMailOptions {
   maxResults?: number
   status?: MailStatus
   query?: string
+  since?: Date
   mailbox?: string
   inboxOnly?: boolean
 }

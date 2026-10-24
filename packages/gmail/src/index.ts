@@ -42,6 +42,7 @@ export {
   isInsufficientScopeError,
   lacksGrantedScope,
   makeGmailService,
+  parseBatchMessagesResponse,
   parseListUnsubscribe,
 } from "./service.js"
 export {

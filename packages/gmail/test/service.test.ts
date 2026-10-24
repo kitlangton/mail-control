@@ -9,6 +9,7 @@ import {
   isInsufficientScopeError,
   lacksGrantedScope,
   makeGmailService,
+  parseBatchMessagesResponse,
   parseListUnsubscribe,
 } from "../src/service"
 import { GmailAuthError, GmailConfigError } from "../src/types"
@@ -171,5 +172,34 @@ describe("makeGmailService", () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("parseBatchMessagesResponse", () => {
+  it("extracts HTTP 200 message payloads keyed by Content-ID index", () => {
+    const raw = [
+      "--batch_abc",
+      "Content-Type: application/http",
+      "Content-ID: <response-item1>",
+      "",
+      "HTTP/1.1 200 OK",
+      "Content-Type: application/json; charset=UTF-8",
+      "",
+      JSON.stringify({ id: "msg-2", snippet: "Second" }),
+      "--batch_abc",
+      "Content-Type: application/http",
+      "Content-ID: <response-item0>",
+      "",
+      "HTTP/1.1 200 OK",
+      "Content-Type: application/json; charset=UTF-8",
+      "",
+      JSON.stringify({ id: "msg-1", snippet: "First" }),
+      "--batch_abc--",
+      "",
+    ].join("\r\n")
+
+    const parsed = parseBatchMessagesResponse(raw, "multipart/mixed; boundary=batch_abc")
+    expect(parsed.get(0)?.id).toBe("msg-1")
+    expect(parsed.get(1)?.id).toBe("msg-2")
   })
 })

@@ -270,6 +270,44 @@ export const parseListUnsubscribe = (value: string): readonly URL[] => {
   })
 }
 
+export const parseBatchMessagesResponse = (
+  raw: string,
+  contentType: string | null,
+): ReadonlyMap<number, gmail_v1.Schema$Message> => {
+  const boundaryMatch = contentType?.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i)
+  const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2]
+  if (!boundary) return new Map()
+
+  const results = new Map<number, gmail_v1.Schema$Message>()
+  const parts = raw.split(`--${boundary}`)
+
+  for (const part of parts) {
+    const idMatch = part.match(/Content-ID:\s*<response-item(\d+)>/i)
+    if (!idMatch?.[1]) continue
+    const index = Number(idMatch[1])
+    if (!Number.isSafeInteger(index)) continue
+
+    const firstSep = part.indexOf("\r\n\r\n")
+    if (firstSep === -1) continue
+    const httpSection = part.slice(firstSep + 4)
+    const statusMatch = httpSection.match(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/i)
+    if (statusMatch?.[1] !== "200") continue
+
+    const secondSep = httpSection.indexOf("\r\n\r\n")
+    if (secondSep === -1) continue
+    const jsonText = httpSection.slice(secondSep + 4).trim()
+    if (!jsonText) continue
+
+    try {
+      results.set(index, JSON.parse(jsonText) as gmail_v1.Schema$Message)
+    } catch {
+      // Ignore malformed part; caller falls back to individual fetch if needed.
+    }
+  }
+
+  return results
+}
+
 /**
  * Create a Gmail service instance with explicit configuration.
  * Use this for multi-account support instead of the singleton `GmailService`.
@@ -698,41 +736,142 @@ export const makeGmailService = (
         })
       })
 
+    const toMessageSummary = (
+      messageId: string,
+      stub: gmail_v1.Schema$Message,
+      detail: gmail_v1.Schema$Message,
+    ): GmailMessageSummary => {
+      const headers = detail.payload?.headers
+      const summary: GmailMessageSummary = {
+        id: messageId,
+        subject: findHeader(headers, "Subject") ?? "(no subject)",
+        from: findHeader(headers, "From") ?? "",
+        snippet: detail.snippet ?? stub.snippet ?? "",
+      }
+
+      const threadId = detail.threadId ?? stub.threadId
+      if (threadId) summary.threadId = threadId
+      const date = findHeader(headers, "Date")
+      if (date) summary.date = date
+      if (detail.labelIds) summary.unread = detail.labelIds.includes("UNREAD")
+      return summary
+    }
+
+    const fetchBatchDetails = async (
+      client: GmailOAuth2Client,
+      chunk: readonly gmail_v1.Schema$Message[],
+    ): Promise<ReadonlyMap<number, gmail_v1.Schema$Message>> => {
+      const { token } = await client.getAccessToken()
+      if (!token) return new Map()
+      const boundary = `batch_mail_control_${Date.now()}_${Math.random().toString(36).slice(2)}`
+      const parts = chunk.map((m, index) =>
+        [
+          `--${boundary}`,
+          "Content-Type: application/http",
+          `Content-ID: <item${index}>`,
+          "",
+          `GET /gmail/v1/users/me/messages/${encodeURIComponent(m.id ?? "")}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&fields=id,threadId,labelIds,snippet,payload/headers HTTP/1.1`,
+          "",
+          "",
+        ].join("\r\n"),
+      )
+      const body = `${parts.join("")}--${boundary}--\r\n`
+
+      const response = await fetch("https://gmail.googleapis.com/batch/gmail/v1", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": `multipart/mixed; boundary=${boundary}`,
+        },
+        body,
+        signal: AbortSignal.timeout(GMAIL_TIMEOUT_MS),
+      })
+      if (!response.ok) return new Map()
+      const raw = await response.text()
+      return parseBatchMessagesResponse(raw, response.headers.get("content-type"))
+    }
+
     const listMessages = (
       options?: ListMessagesOptions,
     ): Effect.Effect<GmailMessageSummary[], GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
+        const client = yield* ensureAuthorized()
         const gmail = yield* getGmail()
+        const targetCount = Math.max(0, options?.maxResults ?? 10)
+        if (targetCount === 0) return []
 
-        const params: gmail_v1.Params$Resource$Users$Messages$List = {
-          userId: "me",
-          maxResults: options?.maxResults ?? 10,
+        const dedupeThreads = Boolean(options?.labelIds?.includes("INBOX"))
+        const seenThreads = new Set<string>()
+        const messages: gmail_v1.Schema$Message[] = []
+        let pageToken: string | undefined
+
+        for (let page = 0; page < 5 && messages.length < targetCount; page++) {
+          const remaining = targetCount - messages.length
+          const pageSize = Math.min(500, dedupeThreads && page > 0 ? Math.max(remaining * 2, 20) : remaining)
+          const params: gmail_v1.Params$Resource$Users$Messages$List = {
+            userId: "me",
+            maxResults: pageSize,
+            fields: "messages(id,threadId),nextPageToken",
+          }
+
+          if (options?.query !== undefined) params.q = options.query
+          if (options?.labelIds !== undefined) params.labelIds = [...options.labelIds]
+          if (pageToken !== undefined) params.pageToken = pageToken
+
+          const listResponse = yield* Effect.tryPromise(() => gmail.users.messages.list(params)).pipe(
+            Effect.mapError(
+              (cause) =>
+                new GmailError({
+                  message: "Failed to list Gmail messages",
+                  cause,
+                }),
+            ),
+            Effect.ensuring(flushTokenSave),
+          )
+
+          const batch = listResponse.data.messages ?? []
+          for (const stub of batch) {
+            if (!stub.id) continue
+            if (dedupeThreads) {
+              const key = stub.threadId ?? stub.id
+              if (seenThreads.has(key)) continue
+              seenThreads.add(key)
+            }
+            messages.push(stub)
+            if (messages.length >= targetCount) break
+          }
+
+          pageToken = listResponse.data.nextPageToken ?? undefined
+          if (!pageToken || batch.length === 0) break
         }
 
-        if (options?.query !== undefined) params.q = options.query
-        if (options?.labelIds !== undefined) params.labelIds = [...options.labelIds]
-
-        const listResponse = yield* Effect.tryPromise(() => gmail.users.messages.list(params)).pipe(
-          Effect.mapError(
-            (cause) =>
-              new GmailError({
-                message: "Failed to list Gmail messages",
-                cause,
-              }),
-          ),
-          Effect.ensuring(flushTokenSave),
-        )
-
-        const messages = listResponse.data.messages ?? []
         if (messages.length === 0) {
           return []
         }
 
+        const batchedDetails = new Map<number, gmail_v1.Schema$Message>()
+        if (messages.length > 1) {
+          for (let offset = 0; offset < messages.length; offset += 100) {
+            const chunk = messages.slice(offset, offset + 100)
+            const chunkMap = yield* Effect.tryPromise(() => fetchBatchDetails(client, chunk)).pipe(
+              Effect.orElseSucceed(() => new Map<number, gmail_v1.Schema$Message>()),
+              Effect.ensuring(flushTokenSave),
+            )
+            for (const [index, detail] of chunkMap) {
+              batchedDetails.set(offset + index, detail)
+            }
+          }
+        }
+
         const summaries = yield* Effect.forEach(
           messages,
-          (message) => {
+          (message, index) => {
             if (!message.id) return Effect.succeed(null)
             const messageId = message.id
+            const fromBatch = batchedDetails.get(index)
+            if (fromBatch) {
+              return Effect.succeed(toMessageSummary(messageId, message, fromBatch))
+            }
 
             return Effect.tryPromise(() =>
               gmail.users.messages.get({
@@ -740,6 +879,7 @@ export const makeGmailService = (
                 id: messageId,
                 format: "metadata",
                 metadataHeaders: ["Subject", "From", "Date"],
+                fields: "id,threadId,labelIds,snippet,payload/headers",
               }),
             ).pipe(
               Effect.mapError(
@@ -749,25 +889,10 @@ export const makeGmailService = (
                     cause,
                   }),
               ),
-              Effect.map((detail) => {
-                const headers = detail.data.payload?.headers
-                const summary: GmailMessageSummary = {
-                  id: messageId,
-                  subject: findHeader(headers, "Subject") ?? "(no subject)",
-                  from: findHeader(headers, "From") ?? "",
-                  snippet: detail.data.snippet ?? message.snippet ?? "",
-                }
-
-                const threadId = detail.data.threadId ?? message.threadId
-                if (threadId) summary.threadId = threadId
-                const date = findHeader(headers, "Date")
-                if (date) summary.date = date
-                if (detail.data.labelIds) summary.unread = detail.data.labelIds.includes("UNREAD")
-                return summary
-              }),
+              Effect.map((detail) => toMessageSummary(messageId, message, detail.data)),
             )
           },
-          { concurrency: 8 },
+          { concurrency: 20 },
         ).pipe(Effect.ensuring(flushTokenSave))
 
         return summaries.filter((summary) => summary !== null)
