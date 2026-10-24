@@ -137,7 +137,7 @@ mail send    -a <id> -t to@x.com -s "Subject" -b "Body" [-A file]
 mail reply   -a <id> <message-id> -b "Body"
 mail forward -a <id> <message-id> -t to@x.com
 
-# Mutate (Gmail; iCloud supports archive/trash/unsubscribe)
+# Mutate (Gmail and iCloud support archive/trash/mark-read/unsubscribe)
 mail archive     -a <id> <message-id>
 mail trash       -a <id> <message-id>
 mail mark-read   -a <id> <message-id>
@@ -182,8 +182,8 @@ body without creating labels or the filter. Gmail filters cannot send mail to Sp
 machine-readable output. Use `-f/--body-file` for long message bodies.
 
 Capabilities are determined by account **type**: Gmail supports every command,
-including `filters`; iCloud supports read, send, archive, trash, and unsubscribe
-(for messages that expose standards-based `List-Unsubscribe` headers).
+including `filters`; iCloud supports read, send, archive, trash, mark-read, and
+unsubscribe (for messages that expose standards-based `List-Unsubscribe` headers).
 
 ## Security notes
 

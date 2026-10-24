@@ -25,7 +25,8 @@ directory with `MAIL_CONTROL_DIR`). Each account has an id (the map key) and a
 - Pass `-a <id>` / `--account <id>` whenever the account matters.
 - `all` is the default for `list`, `search`, and `recent`; use a concrete id for single-message mutations.
 - Discover configured ids by reading `config.json` or running a command and seeing the `[id]` tags in output.
-- Capabilities depend on type: Gmail supports every command, including `filters`; iCloud supports read, send, archive, and trash.
+- Capabilities depend on type: Gmail supports every command, including `filters`; iCloud supports read, send, archive, trash, mark-read, and unsubscribe.
+- On iCloud, `search` and `list -q` translate Gmail-style operators (`from:`, `to:`, `subject:`, `is:unread`, `is:read`, `newer_than:`, `older_than:`) into IMAP search criteria.
 - For iCloud mailbox-specific reads/lists/searches, pass `--mailbox <name>` (e.g. `"Sent Messages"`, `Archive`).
 
 ## Credentials
@@ -59,7 +60,7 @@ Use `--json` for machine-readable output from `list`, `search`, `recent`, `read`
 In JSON mode failures print `{ ok: false, command, error: { code, message, exitCode } }`. Exit codes: 2 usage, 3 auth or setup (`mail auth <id>`), 4 network, 1 anything else.
 
 JSON and text output drain before exit, including bodies larger than the pipe buffer.
-Expired Gmail authorization reports the account-specific `mail auth <id>` command.
+Expired or missing Gmail or iCloud authorization reports the account-specific `mail auth <id>` command.
 
 Daily email review:
 
