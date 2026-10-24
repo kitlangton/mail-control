@@ -20,7 +20,7 @@ import {
 } from "./app.js"
 import { Accounts } from "./config.js"
 import { ExitCode, envelope, failure } from "./control-contract.js"
-import { type MailConfigError, MailError, toMailError } from "./errors.js"
+import { isHostFailure, type MailConfigError, MailError, toMailError } from "./errors.js"
 import { filtersCommand } from "./filters.js"
 import { makeICloudService } from "./icloud.js"
 import { mailLayer } from "./layers.js"
@@ -559,9 +559,14 @@ const cli = Command.runWith(root, {
   version: "0.2.0",
 })
 
-const exitCodeFor = (message: string, config: boolean): number => {
-  if (config || /mail auth|sign in|token|credential|app password|invalid_grant/i.test(message)) return ExitCode.auth
-  if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|network|timed out/i.test(message)) return ExitCode.host
+const exitCodeFor = (error: MailError | MailConfigError): number => {
+  const message = error.message
+  if (
+    error._tag === "MailConfigError" ||
+    /mail auth|sign in|token|credential|app password|invalid_grant/i.test(message)
+  )
+    return ExitCode.auth
+  if (isHostFailure(error)) return ExitCode.host
   if (/--|requires a specific --account|cannot both be specified|must be provided|is required/i.test(message))
     return ExitCode.usage
   return ExitCode.failure
@@ -576,7 +581,7 @@ const commandName = () => {
 // as a clean one-line message instead of a stack trace, or a failure envelope in JSON mode.
 const reportFailure = (error: MailError | MailConfigError) =>
   Effect.gen(function* () {
-    const exitCode = exitCodeFor(error.message, error._tag === "MailConfigError")
+    const exitCode = exitCodeFor(error)
     const code =
       exitCode === ExitCode.auth
         ? "auth"

@@ -1,12 +1,10 @@
 import { constants as fsConstants } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
-import process from "node:process"
-import readline from "node:readline/promises"
-import { Config, Console, Context, Effect, Layer, Option, Redacted } from "effect"
+import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
 import type { gmail_v1 } from "googleapis/build/src/apis/gmail/index.js"
 import * as google from "googleapis/build/src/apis/gmail/index.js"
-import { GMAIL_SCOPES, GMAIL_SETTINGS_SCOPE } from "./auth.js"
+import { GMAIL_SCOPES, GMAIL_SETTINGS_SCOPE, readClientInfo } from "./auth.js"
 import { defaultGmailCredentialsPath, defaultGmailTokenPath } from "./paths.js"
 import type {
   CreateDraftInput,
@@ -25,6 +23,8 @@ import type {
 import { GmailAuthError, GmailConfigError, GmailError, GmailScopeError } from "./types.js"
 
 const DEFAULT_SCOPES = [...GMAIL_SCOPES]
+const GMAIL_TIMEOUT_MS = 30_000
+const UNSUBSCRIBE_TIMEOUT_MS = 15_000
 type GmailOAuth2Client = InstanceType<typeof google.auth.OAuth2>
 type OAuth2Credentials = GmailOAuth2Client["credentials"]
 
@@ -39,19 +39,6 @@ export interface GmailInstanceConfig {
   tokenPath: string
   /** OAuth scopes (defaults to send, readonly, compose) */
   scopes?: string[]
-}
-
-interface CredentialsFile {
-  installed?: {
-    client_id: string
-    client_secret: string
-    redirect_uris?: string[]
-  }
-  web?: {
-    client_id: string
-    client_secret: string
-    redirect_uris?: string[]
-  }
 }
 
 export class GmailConfig extends Context.Service<GmailConfig>()("@mail-control/gmail/GmailConfig", {
@@ -97,36 +84,17 @@ export class GmailConfig extends Context.Service<GmailConfig>()("@mail-control/g
 const isFileNotFound = (cause: unknown): cause is NodeJS.ErrnoException =>
   typeof cause === "object" && cause !== null && "code" in cause && (cause as NodeJS.ErrnoException).code === "ENOENT"
 
-const loadCredentials = (credentialsPath: string): Effect.Effect<CredentialsFile, GmailConfigError> =>
-  Effect.tryPromise({
-    try: async () => {
-      let raw: string
-      try {
-        raw = await fs.readFile(credentialsPath, "utf8")
-      } catch (cause) {
-        throw new GmailConfigError({
-          message: `Failed to read credentials file at ${credentialsPath}`,
-          cause,
-        })
-      }
+const findHeader = (
+  headers: readonly gmail_v1.Schema$MessagePartHeader[] | undefined,
+  name: string,
+): string | undefined => {
+  const target = name.toLowerCase()
+  return headers?.find((header) => header.name?.toLowerCase() === target)?.value ?? undefined
+}
 
-      try {
-        return JSON.parse(raw) as CredentialsFile
-      } catch (cause) {
-        throw new GmailConfigError({
-          message: `Failed to parse credentials JSON at ${credentialsPath}`,
-          cause,
-        })
-      }
-    },
-    catch: (cause) =>
-      cause instanceof GmailConfigError
-        ? cause
-        : new GmailConfigError({
-            message: `Unexpected error loading credentials from ${credentialsPath}`,
-            cause,
-          }),
-  })
+const encodeBase64Url = (value: string): string => Buffer.from(value, "utf8").toString("base64url")
+const decodeBase64UrlBuffer = (value: string): Buffer => Buffer.from(value, "base64url")
+const decodeBase64Url = (value: string): string => decodeBase64UrlBuffer(value).toString("utf8")
 
 const readTokenIfExists = (tokenPath: string): Effect.Effect<Option.Option<OAuth2Credentials>, GmailError> =>
   Effect.tryPromise({
@@ -186,10 +154,10 @@ const saveToken = (tokenPath: string, credentials: OAuth2Credentials): Effect.Ef
         })
       }
 
-      const payload = JSON.stringify(credentials, null, 2)
+      const payload = `${JSON.stringify(credentials, null, 2)}\n`
 
       try {
-        await fs.writeFile(tokenPath, payload, "utf8")
+        await fs.writeFile(tokenPath, payload, { encoding: "utf8", mode: 0o600 })
       } catch (cause) {
         throw new GmailError({
           message: `Failed to write token file at ${tokenPath}`,
@@ -202,28 +170,6 @@ const saveToken = (tokenPath: string, credentials: OAuth2Credentials): Effect.Ef
         ? cause
         : new GmailError({
             message: `Unexpected error saving token to ${tokenPath}`,
-            cause,
-          }),
-  })
-
-const promptForCode = (prompt: string): Effect.Effect<string, GmailAuthError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      })
-      try {
-        return await rl.question(prompt)
-      } finally {
-        rl.close()
-      }
-    },
-    catch: (cause) =>
-      cause instanceof GmailAuthError
-        ? cause
-        : new GmailAuthError({
-            message: "Failed to read authorization code from stdin",
             cause,
           }),
   })
@@ -347,80 +293,39 @@ export const makeGmailService = (
       scopes: instanceConfig.scopes ?? DEFAULT_SCOPES,
     }
     let cachedClient: GmailOAuth2Client | undefined
+    let cachedGmail: gmail_v1.Gmail | undefined
+    let pendingTokenSave: Promise<void> = Promise.resolve()
+
+    const flushTokenSave = Effect.promise(() => pendingTokenSave)
 
     const buildClient = (): Effect.Effect<GmailOAuth2Client, GmailConfigError | GmailError | GmailAuthError> =>
       Effect.gen(function* () {
-        const credentials = yield* loadCredentials(config.credentialsPath)
-        const oauthConfig = credentials.installed ?? credentials.web
-
-        if (!oauthConfig) {
-          return yield* Effect.fail(
-            new GmailConfigError({
-              message: "credentials file must contain an 'installed' or 'web' client configuration",
-            }),
-          )
-        }
-
-        const { client_id: clientId, client_secret: clientSecret, redirect_uris: redirectUris } = oauthConfig
-
-        if (!clientId || !clientSecret) {
-          return yield* Effect.fail(
-            new GmailConfigError({
-              message: "credentials file is missing client_id or client_secret",
-            }),
-          )
-        }
-
-        const redirectUri = redirectUris?.[0]
+        const { clientId, clientSecret, redirectUri } = yield* readClientInfo(config.credentialsPath)
         const client = new google.auth.OAuth2(clientId, clientSecret, redirectUri)
 
         const existingToken = yield* readTokenIfExists(config.tokenPath)
-        if (Option.isSome(existingToken)) {
-          client.setCredentials(existingToken.value)
-
-          client.on("tokens", (tokens) => {
-            const refreshToken = tokens.refresh_token ?? existingToken.value.refresh_token ?? null
-            const merged: OAuth2Credentials = {
-              ...existingToken.value,
-              ...tokens,
-              refresh_token: refreshToken,
-            }
-            saveToken(config.tokenPath, merged).pipe(Effect.runPromise)
-          })
-
-          return client
-        }
-
-        const authUrl = client.generateAuthUrl({
-          access_type: "offline",
-          scope: config.scopes,
-        })
-
-        yield* Console.log("Authorize this app by visiting the following URL:")
-        yield* Console.log(authUrl)
-
-        const code = yield* promptForCode("Enter the code from that page here: ")
-
-        const { tokens } = yield* Effect.tryPromise({
-          try: () => client.getToken(code),
-          catch: (cause) =>
-            new GmailAuthError({
-              message: "Failed to retrieve access token from Google",
-              cause,
-            }),
-        })
-
-        if (!tokens) {
+        if (Option.isNone(existingToken)) {
           return yield* Effect.fail(
             new GmailAuthError({
-              message: "Authorization succeeded but no tokens were returned",
+              message: `Missing OAuth token at ${config.tokenPath}; run: mail auth`,
             }),
           )
         }
 
-        client.setCredentials(tokens)
-        yield* saveToken(config.tokenPath, tokens)
-        yield* Console.log(`Token stored to ${config.tokenPath}`)
+        let currentToken: OAuth2Credentials = existingToken.value
+        client.setCredentials(currentToken)
+
+        client.on("tokens", (tokens) => {
+          const refreshToken = tokens.refresh_token ?? currentToken.refresh_token ?? null
+          currentToken = {
+            ...currentToken,
+            ...tokens,
+            refresh_token: refreshToken,
+          }
+          pendingTokenSave = pendingTokenSave.then(() =>
+            Effect.runPromise(saveToken(config.tokenPath, currentToken).pipe(Effect.ignore)),
+          )
+        })
 
         return client
       })
@@ -436,13 +341,33 @@ export const makeGmailService = (
         return client
       })
 
+    const getGmail = (): Effect.Effect<gmail_v1.Gmail, GmailConfigError | GmailError | GmailAuthError> =>
+      Effect.gen(function* () {
+        const client = yield* ensureAuthorized()
+        if (!cachedGmail) {
+          cachedGmail = google.gmail({ version: "v1", auth: client, timeout: GMAIL_TIMEOUT_MS })
+        }
+        return cachedGmail
+      })
+
+    const gmailCall = <A>(message: string, request: (gmail: gmail_v1.Gmail) => Promise<A>) =>
+      Effect.gen(function* () {
+        const gmail = yield* getGmail()
+        return yield* Effect.tryPromise({
+          try: () => request(gmail),
+          catch: (cause) => new GmailError({ message, cause }),
+        }).pipe(Effect.ensuring(flushTokenSave))
+      })
+
     const encodeHeaderValue = (value: string): string => {
       if ([...value].every((character) => character.charCodeAt(0) <= 0x7f)) return value
       const encoded = Buffer.from(value, "utf-8").toString("base64")
       return `=?UTF-8?B?${encoded}?=`
     }
 
-    const buildMimeMessage = (input: SendEmailInput): string => {
+    const buildMimeMessage = (
+      input: SendEmailInput & { readonly inReplyTo?: string; readonly references?: string },
+    ): string => {
       const boundary = `boundary_${Date.now()}_${Math.random().toString(36).slice(2)}`
       const hasAttachments = Array.isArray(input.attachments) && input.attachments.length > 0
       const hasHtml = input.htmlBody !== undefined
@@ -452,6 +377,8 @@ export const makeGmailService = (
         ...(input.cc ? [`Cc: ${input.cc}`] : []),
         ...(input.bcc ? [`Bcc: ${input.bcc}`] : []),
         `Subject: ${encodeHeaderValue(input.subject)}`,
+        ...(input.inReplyTo ? [`In-Reply-To: ${input.inReplyTo}`] : []),
+        ...(input.references ? [`References: ${input.references}`] : []),
         "MIME-Version: 1.0",
         hasAttachments
           ? `Content-Type: multipart/mixed; boundary="${boundary}"`
@@ -492,29 +419,13 @@ export const makeGmailService = (
 
     const sendEmail = (input: SendEmailInput): Effect.Effect<string, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-
-        const message = buildMimeMessage(input)
-        const encodedMessage = Buffer.from(message)
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=+$/, "")
-
-        const response = yield* Effect.tryPromise({
-          try: () =>
-            gmail.users.messages.send({
-              userId: "me",
-              requestBody: { raw: encodedMessage },
-            }),
-          catch: (cause) =>
-            new GmailError({
-              message: "Failed to send email via Gmail API",
-              cause,
-            }),
-        })
-
+        const encodedMessage = encodeBase64Url(buildMimeMessage(input))
+        const response = yield* gmailCall("Failed to send email via Gmail API", (gmail) =>
+          gmail.users.messages.send({
+            userId: "me",
+            requestBody: { raw: encodedMessage },
+          }),
+        )
         return response.data.id ?? ""
       })
 
@@ -522,109 +433,50 @@ export const makeGmailService = (
       input: ReplyEmailInput,
     ): Effect.Effect<string, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-
-        const originalMessage = yield* Effect.tryPromise(() =>
+        const originalMessage = yield* gmailCall(`Failed to retrieve original message ${input.messageId}`, (gmail) =>
           gmail.users.messages.get({
             userId: "me",
             id: input.messageId,
             format: "metadata",
             metadataHeaders: ["Subject", "From", "To", "Message-ID", "References"],
           }),
-        ).pipe(
-          Effect.mapError(
-            (cause) =>
-              new GmailError({
-                message: `Failed to retrieve original message ${input.messageId}`,
-                cause,
-              }),
-          ),
         )
 
-        const headers = originalMessage.data.payload?.headers ?? []
-        const findHeader = (name: string): string | undefined =>
-          headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? undefined
-
-        const originalSubject = findHeader("Subject") ?? ""
-        const originalFrom = findHeader("From") ?? ""
-        const originalMessageId = findHeader("Message-ID") ?? ""
-        const originalReferences = findHeader("References") ?? ""
+        const headers = originalMessage.data.payload?.headers
+        const originalSubject = findHeader(headers, "Subject") ?? ""
+        const originalFrom = findHeader(headers, "From") ?? ""
+        const originalMessageId = findHeader(headers, "Message-ID") ?? ""
+        const originalReferences = findHeader(headers, "References") ?? ""
         const threadId = originalMessage.data.threadId
 
         const newReferences = originalReferences ? `${originalReferences} ${originalMessageId}` : originalMessageId
-
         const replySubject = originalSubject.toLowerCase().startsWith("re:")
           ? originalSubject
           : `Re: ${originalSubject}`
 
-        const boundary = `boundary_${Date.now()}_${Math.random().toString(36).slice(2)}`
-        const hasAttachments = Array.isArray(input.attachments) && input.attachments.length > 0
+        const encodedMessage = encodeBase64Url(
+          buildMimeMessage({
+            to: originalFrom,
+            subject: replySubject,
+            body: input.body,
+            ...(input.htmlBody !== undefined ? { htmlBody: input.htmlBody } : {}),
+            ...(input.cc !== undefined ? { cc: input.cc } : {}),
+            ...(input.bcc !== undefined ? { bcc: input.bcc } : {}),
+            ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
+            ...(originalMessageId ? { inReplyTo: originalMessageId } : {}),
+            ...(newReferences ? { references: newReferences } : {}),
+          }),
+        )
 
-        const replyHeaders = [
-          `To: ${originalFrom}`,
-          ...(input.cc ? [`Cc: ${input.cc}`] : []),
-          ...(input.bcc ? [`Bcc: ${input.bcc}`] : []),
-          `Subject: ${encodeHeaderValue(replySubject)}`,
-          `In-Reply-To: ${originalMessageId}`,
-          `References: ${newReferences}`,
-          "MIME-Version: 1.0",
-          hasAttachments
-            ? `Content-Type: multipart/mixed; boundary="${boundary}"`
-            : "Content-Type: text/plain; charset=utf-8",
-          "",
-        ]
-
-        let rawMessage: string
-        if (!hasAttachments) {
-          rawMessage = [...replyHeaders, input.body].join("\r\n")
-        } else {
-          const parts: string[] = [
-            ...replyHeaders,
-            "",
-            `--${boundary}`,
-            "Content-Type: text/plain; charset=utf-8",
-            "",
-            input.body,
-          ]
-
-          for (const attachment of input.attachments ?? []) {
-            const base64Content = Buffer.from(attachment.content).toString("base64")
-            parts.push(
-              `--${boundary}`,
-              `Content-Type: ${attachment.mimeType}; name="${attachment.filename}"`,
-              "Content-Transfer-Encoding: base64",
-              `Content-Disposition: attachment; filename="${attachment.filename}"`,
-              "",
-              base64Content,
-            )
-          }
-
-          parts.push(`--${boundary}--`)
-          rawMessage = parts.join("\r\n")
-        }
-
-        const encodedMessage = Buffer.from(rawMessage)
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=+$/, "")
-
-        const response = yield* Effect.tryPromise({
-          try: () =>
-            gmail.users.messages.send({
-              userId: "me",
-              requestBody: {
-                raw: encodedMessage,
-                threadId: threadId ?? null,
-              },
-            }),
-          catch: (cause) =>
-            new GmailError({
-              message: "Failed to send reply via Gmail API",
-              cause,
-            }),
-        })
+        const response = yield* gmailCall("Failed to send reply via Gmail API", (gmail) =>
+          gmail.users.messages.send({
+            userId: "me",
+            requestBody: {
+              raw: encodedMessage,
+              threadId: threadId ?? null,
+            },
+          }),
+        )
 
         return response.data.id ?? ""
       })
@@ -633,39 +485,21 @@ export const makeGmailService = (
       input: CreateDraftInput,
     ): Effect.Effect<GmailDraftInfo, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-
-        const message = buildMimeMessage(input)
-        const encodedMessage = Buffer.from(message)
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=+$/, "")
-
-        const response = yield* Effect.tryPromise({
-          try: () =>
-            gmail.users.drafts.create({
-              userId: "me",
-              requestBody: {
-                message: { raw: encodedMessage },
-              },
-            }),
-          catch: (cause) =>
-            new GmailError({
-              message: "Failed to create draft via Gmail API",
-              cause,
-            }),
-        })
+        const encodedMessage = encodeBase64Url(buildMimeMessage(input))
+        const response = yield* gmailCall("Failed to create draft via Gmail API", (gmail) =>
+          gmail.users.drafts.create({
+            userId: "me",
+            requestBody: {
+              message: { raw: encodedMessage },
+            },
+          }),
+        )
 
         return {
           id: response.data.id ?? "",
           messageId: response.data.message?.id ?? "",
         }
       })
-
-    const decodeBase64Url = (value: string): string =>
-      Buffer.from(value.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")
 
     const extractBody = (
       part: gmail_v1.Schema$MessagePart | undefined,
@@ -721,43 +555,29 @@ export const makeGmailService = (
 
     const readMessage = (id: string): Effect.Effect<GmailMessageBody, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-
-        const detail = yield* Effect.tryPromise(() =>
+        const detail = yield* gmailCall(`Failed to retrieve Gmail message ${id}`, (gmail) =>
           gmail.users.messages.get({
             userId: "me",
             id,
             format: "full",
           }),
-        ).pipe(
-          Effect.mapError(
-            (cause) =>
-              new GmailError({
-                message: `Failed to retrieve Gmail message ${id}`,
-                cause,
-              }),
-          ),
         )
 
-        const headers = detail.data.payload?.headers ?? []
-        const findHeader = (name: string): string | undefined =>
-          headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? undefined
-
+        const headers = detail.data.payload?.headers
         const bodyParts = extractBody(detail.data.payload)
         const body = bodyParts.text ?? bodyParts.html ?? ""
         const attachments = extractAttachments(detail.data.payload)
 
         const message: GmailMessageBody = {
           id,
-          subject: findHeader("Subject") ?? "(no subject)",
-          from: findHeader("From") ?? "",
+          subject: findHeader(headers, "Subject") ?? "(no subject)",
+          from: findHeader(headers, "From") ?? "",
           body,
           ...(bodyParts.html ? { htmlBody: bodyParts.html } : {}),
           attachments,
         }
 
-        const date = findHeader("Date")
+        const date = findHeader(headers, "Date")
         if (date) message.date = date
         if (detail.data.labelIds) {
           message.unread = detail.data.labelIds.includes("UNREAD")
@@ -771,23 +591,14 @@ export const makeGmailService = (
       attachmentId: string,
     ): Effect.Effect<Buffer, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-
-        const response = yield* Effect.tryPromise(() =>
-          gmail.users.messages.attachments.get({
-            userId: "me",
-            messageId,
-            id: attachmentId,
-          }),
-        ).pipe(
-          Effect.mapError(
-            (cause) =>
-              new GmailError({
-                message: `Failed to fetch attachment ${attachmentId} from message ${messageId}`,
-                cause,
-              }),
-          ),
+        const response = yield* gmailCall(
+          `Failed to fetch attachment ${attachmentId} from message ${messageId}`,
+          (gmail) =>
+            gmail.users.messages.attachments.get({
+              userId: "me",
+              messageId,
+              id: attachmentId,
+            }),
         )
 
         const data = response.data.data
@@ -795,48 +606,27 @@ export const makeGmailService = (
           return yield* Effect.fail(new GmailError({ message: `Attachment ${attachmentId} has no data` }))
         }
 
-        return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64")
+        return decodeBase64UrlBuffer(data)
       })
 
     const modifyMessageLabels = (
       id: string,
       removeLabelIds: readonly string[],
     ): Effect.Effect<void, GmailError | GmailConfigError | GmailAuthError> =>
-      Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-
-        yield* Effect.tryPromise({
-          try: () =>
-            gmail.users.messages.modify({
-              userId: "me",
-              id,
-              requestBody: { removeLabelIds: [...removeLabelIds] },
-            }),
-          catch: (cause) =>
-            new GmailError({
-              message: `Failed to update Gmail message ${id}`,
-              cause,
-            }),
-        })
-      })
+      gmailCall(`Failed to update Gmail message ${id}`, (gmail) =>
+        gmail.users.messages.modify({
+          userId: "me",
+          id,
+          requestBody: { removeLabelIds: [...removeLabelIds] },
+        }),
+      ).pipe(Effect.asVoid)
 
     const archiveMessage = (id: string) => modifyMessageLabels(id, ["INBOX"])
 
     const trashMessage = (id: string): Effect.Effect<void, GmailError | GmailConfigError | GmailAuthError> =>
-      Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-
-        yield* Effect.tryPromise({
-          try: () => gmail.users.messages.trash({ userId: "me", id }),
-          catch: (cause) =>
-            new GmailError({
-              message: `Failed to move Gmail message ${id} to trash`,
-              cause,
-            }),
-        })
-      })
+      gmailCall(`Failed to move Gmail message ${id} to trash`, (gmail) =>
+        gmail.users.messages.trash({ userId: "me", id }),
+      ).pipe(Effect.asVoid)
 
     const markMessageRead = (id: string) => modifyMessageLabels(id, ["UNREAD"])
 
@@ -844,34 +634,26 @@ export const makeGmailService = (
       id: string,
     ): Effect.Effect<GmailUnsubscribeResult, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-        const detail = yield* Effect.tryPromise({
-          try: () =>
-            gmail.users.messages.get({
-              userId: "me",
-              id,
-              format: "metadata",
-              metadataHeaders: ["List-Unsubscribe", "List-Unsubscribe-Post"],
-            }),
-          catch: (cause) =>
-            new GmailError({
-              message: `Failed to retrieve unsubscribe headers for Gmail message ${id}`,
-              cause,
-            }),
-        })
+        const detail = yield* gmailCall(`Failed to retrieve unsubscribe headers for Gmail message ${id}`, (gmail) =>
+          gmail.users.messages.get({
+            userId: "me",
+            id,
+            format: "metadata",
+            metadataHeaders: ["List-Unsubscribe", "List-Unsubscribe-Post"],
+          }),
+        )
 
-        const headers = detail.data.payload?.headers ?? []
-        const findHeader = (name: string): string | undefined =>
-          headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? undefined
-        const listUnsubscribe = findHeader("List-Unsubscribe")
+        const headers = detail.data.payload?.headers
+        const listUnsubscribe = findHeader(headers, "List-Unsubscribe")
 
         if (!listUnsubscribe) {
           return yield* new GmailError({ message: `Message ${id} does not provide a List-Unsubscribe header` })
         }
 
         const destinations = parseListUnsubscribe(listUnsubscribe)
-        const oneClick = findHeader("List-Unsubscribe-Post")?.toLowerCase().includes("list-unsubscribe=one-click")
+        const oneClick = findHeader(headers, "List-Unsubscribe-Post")
+          ?.toLowerCase()
+          .includes("list-unsubscribe=one-click")
         const httpsDestination = destinations.find((destination) => destination.protocol === "https:")
 
         if (oneClick && httpsDestination) {
@@ -882,6 +664,7 @@ export const makeGmailService = (
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
                 body: "List-Unsubscribe=One-Click",
                 redirect: "follow",
+                signal: AbortSignal.timeout(UNSUBSCRIBE_TIMEOUT_MS),
               })
               if (!response.ok) {
                 throw new Error(`HTTP ${response.status} ${response.statusText}`)
@@ -919,8 +702,7 @@ export const makeGmailService = (
       options?: ListMessagesOptions,
     ): Effect.Effect<GmailMessageSummary[], GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
+        const gmail = yield* getGmail()
 
         const params: gmail_v1.Params$Resource$Users$Messages$List = {
           userId: "me",
@@ -938,6 +720,7 @@ export const makeGmailService = (
                 cause,
               }),
           ),
+          Effect.ensuring(flushTokenSave),
         )
 
         const messages = listResponse.data.messages ?? []
@@ -967,41 +750,34 @@ export const makeGmailService = (
                   }),
               ),
               Effect.map((detail) => {
-                const headers = detail.data.payload?.headers ?? []
-                const findHeader = (name: string): string | undefined =>
-                  headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? undefined
-
+                const headers = detail.data.payload?.headers
                 const summary: GmailMessageSummary = {
                   id: messageId,
-                  subject: findHeader("Subject") ?? "(no subject)",
-                  from: findHeader("From") ?? "",
+                  subject: findHeader(headers, "Subject") ?? "(no subject)",
+                  from: findHeader(headers, "From") ?? "",
+                  snippet: detail.data.snippet ?? message.snippet ?? "",
                 }
 
                 const threadId = detail.data.threadId ?? message.threadId
                 if (threadId) summary.threadId = threadId
-                const date = findHeader("Date")
+                const date = findHeader(headers, "Date")
                 if (date) summary.date = date
-                const snippet = detail.data.snippet ?? message.snippet
-                if (snippet) summary.snippet = snippet
                 if (detail.data.labelIds) summary.unread = detail.data.labelIds.includes("UNREAD")
                 return summary
               }),
             )
           },
           { concurrency: 8 },
-        )
+        ).pipe(Effect.ensuring(flushTokenSave))
 
         return summaries.filter((summary) => summary !== null)
       })
 
     const listLabels = (): Effect.Effect<GmailLabel[], GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-        const response = yield* Effect.tryPromise({
-          try: () => gmail.users.labels.list({ userId: "me" }),
-          catch: (cause) => new GmailError({ message: "Failed to list Gmail labels", cause }),
-        })
+        const response = yield* gmailCall("Failed to list Gmail labels", (gmail) =>
+          gmail.users.labels.list({ userId: "me" }),
+        )
         return (response.data.labels ?? []).flatMap((label) =>
           label.id && label.name
             ? [{ id: label.id, name: label.name, ...(present(label.type) ? { type: label.type } : {}) }]
@@ -1011,16 +787,12 @@ export const makeGmailService = (
 
     const createLabel = (name: string): Effect.Effect<GmailLabel, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const client = yield* ensureAuthorized()
-        const gmail = google.gmail({ version: "v1", auth: client })
-        const response = yield* Effect.tryPromise({
-          try: () =>
-            gmail.users.labels.create({
-              userId: "me",
-              requestBody: { name, labelListVisibility: "labelShow", messageListVisibility: "show" },
-            }),
-          catch: (cause) => new GmailError({ message: `Failed to create Gmail label "${name}"`, cause }),
-        })
+        const response = yield* gmailCall(`Failed to create Gmail label "${name}"`, (gmail) =>
+          gmail.users.labels.create({
+            userId: "me",
+            requestBody: { name, labelListVisibility: "labelShow", messageListVisibility: "show" },
+          }),
+        )
         return { id: response.data.id ?? "", name: response.data.name ?? name, type: response.data.type ?? "user" }
       })
 
@@ -1042,7 +814,7 @@ export const makeGmailService = (
         if (lacksGrantedScope(client.credentials.scope, GMAIL_SETTINGS_SCOPE)) {
           return yield* missingSettingsScope()
         }
-        return google.gmail({ version: "v1", auth: client })
+        return yield* getGmail()
       })
 
     const settingsRequest = <A>(message: string, request: () => Promise<A>) =>
@@ -1050,7 +822,7 @@ export const makeGmailService = (
         try: request,
         catch: (cause) =>
           isInsufficientScopeError(cause) ? missingSettingsScope(cause) : new GmailError({ message, cause }),
-      })
+      }).pipe(Effect.ensuring(flushTokenSave))
 
     const listFilters = (): Effect.Effect<
       GmailFilter[],

@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs"
-import * as path from "node:path"
 import { NodeFileSystem } from "@effect/platform-node"
 import { ConfigProvider, Layer } from "effect"
 
@@ -17,6 +16,3 @@ export const envLayer = (envPath = ".env") =>
   existsSync(envPath)
     ? ConfigProvider.layerAdd(ConfigProvider.fromDotEnv({ path: envPath })).pipe(Layer.provide(NodeFileSystem.layer))
     : Layer.empty
-
-export const envLayerFrom = (dirname: string, relativePath = "../../../.env") =>
-  envLayer(path.resolve(dirname, relativePath))

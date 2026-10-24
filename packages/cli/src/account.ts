@@ -54,6 +54,17 @@ export const gmailAccountPaths = (id: AccountId, config: GmailAccountConfig, dir
   tokenPath: expandHome(config.tokenPath ?? path.join(dir, `${id}-token.json`)),
 })
 
+const acquireGmail = (
+  account: ResolvedAccount,
+  config: GmailAccountConfig,
+): Effect.Effect<GmailServiceInterface, MailError, Accounts> =>
+  Effect.gen(function* () {
+    const accounts = yield* Accounts
+    return yield* makeGmailService(gmailAccountPaths(account.id, config, accounts.dir)).pipe(
+      Effect.mapError(mailError(`Could not initialize account "${account.id}" — run: mail auth ${account.id}`)),
+    )
+  })
+
 /** Acquire the raw Gmail client for Gmail-only features such as filters. */
 export const withGmail = <A, R>(
   account: ResolvedAccount,
@@ -64,21 +75,15 @@ export const withGmail = <A, R>(
     if (config.type !== "gmail") {
       return yield* new MailError({ message: `Account "${account.id}" is not a Gmail account.` })
     }
-    const accounts = yield* Accounts
-    const gmail = yield* makeGmailService(gmailAccountPaths(account.id, config, accounts.dir)).pipe(
-      Effect.mapError(mailError(`Could not initialize account "${account.id}" — run: mail auth ${account.id}`)),
-    )
+    const gmail = yield* acquireGmail(account, config)
     return yield* run(gmail)
-  })
+  }).pipe(Effect.mapError((error) => accountFailure(account.id, error)))
 
 const acquireMailService = (account: ResolvedAccount): Effect.Effect<MailService["Service"], MailError, AccountEnv> =>
   Effect.gen(function* () {
     const config = account.config
     if (config.type === "gmail") {
-      const accounts = yield* Accounts
-      const gmail = yield* makeGmailService(gmailAccountPaths(account.id, config, accounts.dir)).pipe(
-        Effect.mapError(mailError(`Could not initialize account "${account.id}" — run: mail auth ${account.id}`)),
-      )
+      const gmail = yield* acquireGmail(account, config)
       return makeGmailMailService(account.id, gmail)
     }
 

@@ -1,6 +1,6 @@
 import { Effect, Exit } from "effect"
 import { describe, expect, it } from "vitest"
-import { mergeAccountListResults } from "../src/app.js"
+import { mergeAccountListResults, sanitizeAttachmentFilename } from "../src/app.js"
 import { MailError, type MailMessageSummary } from "../src/types.js"
 
 const summary = (overrides: Partial<MailMessageSummary>): MailMessageSummary => ({
@@ -42,5 +42,16 @@ describe("mergeAccountListResults", () => {
         ),
       ),
     ).rejects.toBeInstanceOf(MailError)
+  })
+})
+
+describe("sanitizeAttachmentFilename", () => {
+  it("strips directory traversal prefixes and rejects empty or dot names", () => {
+    expect(sanitizeAttachmentFilename("../../etc/passwd")).toBe("passwd")
+    expect(sanitizeAttachmentFilename("..\\..\\evil.sh")).toBe("evil.sh")
+    expect(sanitizeAttachmentFilename("..")).toBe("attachment-1")
+    expect(sanitizeAttachmentFilename(".", 2)).toBe("attachment-3")
+    expect(sanitizeAttachmentFilename("   ", 1)).toBe("attachment-2")
+    expect(sanitizeAttachmentFilename("invoice.pdf")).toBe("invoice.pdf")
   })
 })

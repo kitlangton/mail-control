@@ -78,9 +78,3 @@ export const isOnOrAfter = (date: string | undefined, lowerBound: Date) => {
   const timestamp = Date.parse(date)
   return Number.isNaN(timestamp) ? true : timestamp >= lowerBound.getTime()
 }
-
-export const isBefore = (date: string | undefined, upperBound: Date) => {
-  if (date === undefined) return true
-  const timestamp = Date.parse(date)
-  return Number.isNaN(timestamp) ? true : timestamp < upperBound.getTime()
-}

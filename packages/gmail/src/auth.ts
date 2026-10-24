@@ -33,23 +33,50 @@ export interface AuthorizeGmailOptions {
   readonly port?: number
 }
 
-const readClientInfo = (
-  credentialsPath: string,
-): Effect.Effect<{ clientId: string; clientSecret: string }, GmailConfigError> =>
+export interface OAuthClientInfo {
+  readonly clientId: string
+  readonly clientSecret: string
+  readonly redirectUri?: string
+}
+
+export const readClientInfo = (credentialsPath: string): Effect.Effect<OAuthClientInfo, GmailConfigError> =>
   Effect.tryPromise({
     try: async () => {
-      const raw = await fs.readFile(credentialsPath, "utf8")
-      const parsed = JSON.parse(raw) as {
-        installed?: { client_id?: string; client_secret?: string }
-        web?: { client_id?: string; client_secret?: string }
+      let raw: string
+      try {
+        raw = await fs.readFile(credentialsPath, "utf8")
+      } catch (cause) {
+        throw new GmailConfigError({
+          message: `Failed to read credentials file at ${credentialsPath}`,
+          cause,
+        })
       }
+
+      let parsed: {
+        installed?: { client_id?: string; client_secret?: string; redirect_uris?: string[] }
+        web?: { client_id?: string; client_secret?: string; redirect_uris?: string[] }
+      }
+      try {
+        parsed = JSON.parse(raw)
+      } catch (cause) {
+        throw new GmailConfigError({
+          message: `Failed to parse credentials JSON at ${credentialsPath}`,
+          cause,
+        })
+      }
+
       const oauth = parsed.installed ?? parsed.web
       if (!oauth?.client_id || !oauth?.client_secret) {
         throw new GmailConfigError({
           message: `Credentials at ${credentialsPath} are missing an installed/web client_id and client_secret`,
         })
       }
-      return { clientId: oauth.client_id, clientSecret: oauth.client_secret }
+      const redirectUri = oauth.redirect_uris?.[0]
+      return {
+        clientId: oauth.client_id,
+        clientSecret: oauth.client_secret,
+        ...(redirectUri !== undefined ? { redirectUri } : {}),
+      }
     },
     catch: (cause) =>
       cause instanceof GmailConfigError

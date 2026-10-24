@@ -1,9 +1,17 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import { ConfigProvider, Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import { defaultGmailTokenPath } from "../src/paths"
-import { GmailConfig, isInsufficientScopeError, lacksGrantedScope, parseListUnsubscribe } from "../src/service"
-import { GmailConfigError } from "../src/types"
+import {
+  GmailConfig,
+  isInsufficientScopeError,
+  lacksGrantedScope,
+  makeGmailService,
+  parseListUnsubscribe,
+} from "../src/service"
+import { GmailAuthError, GmailConfigError } from "../src/types"
 
 const DEFAULT_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 const DEFAULT_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
@@ -138,5 +146,30 @@ describe("scope detection", () => {
     expect(lacksGrantedScope(granted, SETTINGS_SCOPE)).toBe(true)
     expect(lacksGrantedScope(`${granted} ${SETTINGS_SCOPE}`, SETTINGS_SCOPE)).toBe(false)
     expect(lacksGrantedScope(undefined, SETTINGS_SCOPE)).toBe(false)
+  })
+})
+
+describe("makeGmailService", () => {
+  it("fails immediately with GmailAuthError when the token file is missing instead of prompting on stdin", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "mail-control-gmail-test-"))
+    try {
+      const credentialsPath = path.join(dir, "credentials.json")
+      const tokenPath = path.join(dir, "missing-token.json")
+      await writeFile(
+        credentialsPath,
+        JSON.stringify({
+          installed: { client_id: "id", client_secret: "secret", redirect_uris: ["http://localhost"] },
+        }),
+        "utf8",
+      )
+
+      const service = await Effect.runPromise(makeGmailService({ credentialsPath, tokenPath }))
+      const error = await Effect.runPromise(Effect.flip(service.listMessages({ maxResults: 1 })))
+
+      expect(error).toBeInstanceOf(GmailAuthError)
+      expect(error.message).toContain("Missing OAuth token")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

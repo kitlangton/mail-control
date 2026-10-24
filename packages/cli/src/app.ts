@@ -1,3 +1,4 @@
+import path from "node:path"
 import { Cause, Effect, Exit, FileSystem, Option, Path } from "effect"
 import { type AccountEnv, requireAccount, withAccount } from "./account.js"
 import {
@@ -216,6 +217,33 @@ export const forwardMessage = (
     )
   })
 
+export const sanitizeAttachmentFilename = (raw: string, index = 0): string => {
+  const leaf = Array.from(path.posix.basename(raw.replaceAll("\\", "/")), (ch) => {
+    const code = ch.charCodeAt(0)
+    return code <= 0x1f || code === 0x7f ? "_" : ch
+  })
+    .join("")
+    .trim()
+  if (!leaf || leaf === "." || leaf === "..") {
+    return `attachment-${index + 1}`
+  }
+  return leaf
+}
+
+const dedupeFilename = (name: string, used: Set<string>): string => {
+  if (!used.has(name)) {
+    used.add(name)
+    return name
+  }
+  const ext = path.posix.extname(name)
+  const stem = ext ? name.slice(0, -ext.length) : name
+  let counter = 2
+  while (used.has(`${stem}-${counter}${ext}`)) counter++
+  const candidate = `${stem}-${counter}${ext}`
+  used.add(candidate)
+  return candidate
+}
+
 export const downloadAttachments = (
   input: DownloadInput,
 ): Effect.Effect<DownloadResult, MailError, AccountEnv | FileSystem.FileSystem | Path.Path> =>
@@ -230,18 +258,20 @@ export const downloadAttachments = (
     }
 
     yield* fs.makeDirectory(input.outputDir, { recursive: true }).pipe(Effect.ignore)
+    const usedNames = new Set<string>()
     const files = yield* Effect.all(
-      attachments.map((attachment) =>
+      attachments.map((attachment, index) =>
         Effect.gen(function* () {
-          const filePath = pathService.join(input.outputDir, attachment.filename)
+          const safeFilename = dedupeFilename(sanitizeAttachmentFilename(attachment.filename, index), usedNames)
+          const filePath = pathService.join(input.outputDir, safeFilename)
           yield* fs
             .writeFile(filePath, new Uint8Array(attachment.content))
             .pipe(
               Effect.mapError(
-                (cause) => new MailError({ message: `Failed to write attachment ${attachment.filename}`, cause }),
+                (cause) => new MailError({ message: `Failed to write attachment ${safeFilename}`, cause }),
               ),
             )
-          return { filename: attachment.filename, path: filePath }
+          return { filename: safeFilename, path: filePath }
         }),
       ),
     )

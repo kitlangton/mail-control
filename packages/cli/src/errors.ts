@@ -40,12 +40,17 @@ export const accountFailure = (account: string, error: MailError): MailError => 
     const detail = cause as {
       _tag?: string
       code?: unknown
+      authenticationFailed?: unknown
+      serverResponseCode?: unknown
       message?: unknown
       response?: { status?: number; data?: { error?: unknown } }
       cause?: unknown
     }
     if (
       detail._tag === "GmailAuthError" ||
+      detail._tag === "GmailConfigError" ||
+      detail.authenticationFailed === true ||
+      detail.serverResponseCode === "AUTHENTICATIONFAILED" ||
       detail.code === 401 ||
       detail.code === "invalid_grant" ||
       detail.response?.status === 401 ||
@@ -57,4 +62,24 @@ export const accountFailure = (account: string, error: MailError): MailError => 
     cause = detail.cause
   }
   return error
+}
+
+const HOST_ERROR_PATTERN =
+  /ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|ETIMEOUT|CONNECT_TIMEOUT|GREETING_TIMEOUT|TimeoutError|network|timed out/i
+
+/** True when `error` or any nested `cause` indicates a network/host/timeout failure. */
+export const isHostFailure = (error: unknown): boolean => {
+  let cause: unknown = error
+  for (let depth = 0; depth < 8 && typeof cause === "object" && cause !== null; depth++) {
+    const detail = cause as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown }
+    if (
+      (typeof detail.code === "string" && HOST_ERROR_PATTERN.test(detail.code)) ||
+      (typeof detail.name === "string" && HOST_ERROR_PATTERN.test(detail.name)) ||
+      (typeof detail.message === "string" && HOST_ERROR_PATTERN.test(detail.message))
+    ) {
+      return true
+    }
+    cause = detail.cause
+  }
+  return false
 }

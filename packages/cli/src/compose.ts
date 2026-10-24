@@ -52,12 +52,16 @@ const Contact = Schema.Struct({
 
 const execFileAsync = promisify(execFile)
 
+const CONTACTS_TIMEOUT_MS = 10_000
+
 const resolveRecipient = Effect.fn("Mail.resolveRecipient")(function* (recipient: string) {
   if (recipient.includes("@")) return recipient
 
   const result = yield* Effect.tryPromise({
     try: async () => {
-      const result = await execFileAsync("contacts", ["resolve", recipient, "--json"])
+      const result = await execFileAsync("contacts", ["resolve", recipient, "--json"], {
+        timeout: CONTACTS_TIMEOUT_MS,
+      })
       return { stdout: result.stdout, stderr: result.stderr }
     },
     catch: (cause) =>
