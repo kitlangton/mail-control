@@ -585,8 +585,9 @@ const reportFailure = (error: MailError | MailConfigError) =>
           : exitCode === ExitCode.usage
             ? "usage"
             : "error"
+    // Invoke's clean_cli_error and tools/check read this stderr line, so it stays in JSON mode.
+    yield* Console.error(`mail: ${error.message}`)
     if (outputMode.json) yield* printJson(failure(commandName(), code, error.message, { exitCode }))
-    else yield* Console.error(`mail: ${error.message}`)
     process.exitCode = exitCode
   })
 
