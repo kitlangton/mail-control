@@ -42,6 +42,7 @@ export interface EnvelopeOptions {
 }
 
 /** Extra fields (e.g. `nextBefore`, `failures`) go after the contract keys and can't override them. */
+// biome-ignore lint/complexity/noBannedTypes: the default adds no extra keys
 export const envelope = <T, X extends Record<string, unknown> = {}>(
   command: string,
   items: ReadonlyArray<T>,
