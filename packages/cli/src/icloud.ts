@@ -250,7 +250,11 @@ export const makeICloudService = (
             setAuthenticationState: () => Promise<void>
             startSession: () => Promise<void>
           }
-          if (config.imap.secure && typeof internal.startSession === "function") {
+          if (
+            config.imap.host === "imap.mail.me.com" &&
+            config.imap.secure &&
+            typeof internal.startSession === "function"
+          ) {
             internal.setAuthenticationState = async function () {
               this.state = this.states.AUTHENTICATED
               this.authenticated = true

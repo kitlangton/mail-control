@@ -287,15 +287,17 @@ export const parseBatchMessagesResponse = (
     const index = Number(idMatch[1])
     if (!Number.isSafeInteger(index)) continue
 
-    const firstSep = part.indexOf("\r\n\r\n")
+    const firstSep = part.search(/\r?\n\r?\n/)
     if (firstSep === -1) continue
-    const httpSection = part.slice(firstSep + 4)
+    const firstSepLen = part.startsWith("\r\n\r\n", firstSep) ? 4 : 2
+    const httpSection = part.slice(firstSep + firstSepLen)
     const statusMatch = httpSection.match(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/i)
     if (statusMatch?.[1] !== "200") continue
 
-    const secondSep = httpSection.indexOf("\r\n\r\n")
+    const secondSep = httpSection.search(/\r?\n\r?\n/)
     if (secondSep === -1) continue
-    const jsonText = httpSection.slice(secondSep + 4).trim()
+    const secondSepLen = httpSection.startsWith("\r\n\r\n", secondSep) ? 4 : 2
+    const jsonText = httpSection.slice(secondSep + secondSepLen).trim()
     if (!jsonText) continue
 
     try {
@@ -397,9 +399,12 @@ export const makeGmailService = (
         }).pipe(Effect.ensuring(flushTokenSave))
       })
 
+    const stripCrLf = (value: string): string => value.replace(/[\r\n]+/g, " ").trim()
+
     const encodeHeaderValue = (value: string): string => {
-      if ([...value].every((character) => character.charCodeAt(0) <= 0x7f)) return value
-      const encoded = Buffer.from(value, "utf-8").toString("base64")
+      const clean = stripCrLf(value)
+      if ([...clean].every((character) => character.charCodeAt(0) <= 0x7f)) return clean
+      const encoded = Buffer.from(clean, "utf-8").toString("base64")
       return `=?UTF-8?B?${encoded}?=`
     }
 
@@ -411,12 +416,12 @@ export const makeGmailService = (
       const hasHtml = input.htmlBody !== undefined
 
       const headers = [
-        `To: ${input.to}`,
-        ...(input.cc ? [`Cc: ${input.cc}`] : []),
-        ...(input.bcc ? [`Bcc: ${input.bcc}`] : []),
+        `To: ${stripCrLf(input.to)}`,
+        ...(input.cc ? [`Cc: ${stripCrLf(input.cc)}`] : []),
+        ...(input.bcc ? [`Bcc: ${stripCrLf(input.bcc)}`] : []),
         `Subject: ${encodeHeaderValue(input.subject)}`,
-        ...(input.inReplyTo ? [`In-Reply-To: ${input.inReplyTo}`] : []),
-        ...(input.references ? [`References: ${input.references}`] : []),
+        ...(input.inReplyTo ? [`In-Reply-To: ${stripCrLf(input.inReplyTo)}`] : []),
+        ...(input.references ? [`References: ${stripCrLf(input.references)}`] : []),
         "MIME-Version: 1.0",
         hasAttachments
           ? `Content-Type: multipart/mixed; boundary="${boundary}"`
