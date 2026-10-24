@@ -127,7 +127,8 @@ const writeToken = (tokenPath: string, tokens: unknown): Effect.Effect<void, Gma
   Effect.tryPromise({
     try: async () => {
       await fs.mkdir(path.dirname(tokenPath), { recursive: true })
-      await fs.writeFile(tokenPath, JSON.stringify(tokens, null, 2), { mode: 0o600 })
+      await fs.writeFile(tokenPath, `${JSON.stringify(tokens, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
+      await fs.chmod(tokenPath, 0o600)
     },
     catch: (cause) => new GmailAuthError({ message: `Failed to write token to ${tokenPath}`, cause }),
   })

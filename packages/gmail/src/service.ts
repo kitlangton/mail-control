@@ -23,8 +23,10 @@ import type {
 import { GmailAuthError, GmailConfigError, GmailError, GmailScopeError } from "./types.js"
 
 const DEFAULT_SCOPES = [...GMAIL_SCOPES]
-const GMAIL_TIMEOUT_MS = 30_000
+const GMAIL_READ_TIMEOUT_MS = 30_000
 const UNSUBSCRIBE_TIMEOUT_MS = 15_000
+const GMAIL_BATCH_CHUNK_SIZE = 50
+const GMAIL_FALLBACK_CONCURRENCY = 8
 type GmailOAuth2Client = InstanceType<typeof google.auth.OAuth2>
 type OAuth2Credentials = GmailOAuth2Client["credentials"]
 
@@ -158,6 +160,7 @@ const saveToken = (tokenPath: string, credentials: OAuth2Credentials): Effect.Ef
 
       try {
         await fs.writeFile(tokenPath, payload, { encoding: "utf8", mode: 0o600 })
+        await fs.chmod(tokenPath, 0o600)
       } catch (cause) {
         throw new GmailError({
           message: `Failed to write token file at ${tokenPath}`,
@@ -333,7 +336,8 @@ export const makeGmailService = (
       scopes: instanceConfig.scopes ?? DEFAULT_SCOPES,
     }
     let cachedClient: GmailOAuth2Client | undefined
-    let cachedGmail: gmail_v1.Gmail | undefined
+    let cachedReadGmail: gmail_v1.Gmail | undefined
+    let cachedWriteGmail: gmail_v1.Gmail | undefined
     let pendingTokenSave: Promise<void> = Promise.resolve()
 
     const flushTokenSave = Effect.promise(() => pendingTokenSave)
@@ -381,18 +385,36 @@ export const makeGmailService = (
         return client
       })
 
-    const getGmail = (): Effect.Effect<gmail_v1.Gmail, GmailConfigError | GmailError | GmailAuthError> =>
+    const getReadGmail = (): Effect.Effect<gmail_v1.Gmail, GmailConfigError | GmailError | GmailAuthError> =>
       Effect.gen(function* () {
         const client = yield* ensureAuthorized()
-        if (!cachedGmail) {
-          cachedGmail = google.gmail({ version: "v1", auth: client, timeout: GMAIL_TIMEOUT_MS })
+        if (!cachedReadGmail) {
+          cachedReadGmail = google.gmail({ version: "v1", auth: client, timeout: GMAIL_READ_TIMEOUT_MS })
         }
-        return cachedGmail
+        return cachedReadGmail
       })
 
-    const gmailCall = <A>(message: string, request: (gmail: gmail_v1.Gmail) => Promise<A>) =>
+    const getWriteGmail = (): Effect.Effect<gmail_v1.Gmail, GmailConfigError | GmailError | GmailAuthError> =>
       Effect.gen(function* () {
-        const gmail = yield* getGmail()
+        const client = yield* ensureAuthorized()
+        if (!cachedWriteGmail) {
+          cachedWriteGmail = google.gmail({ version: "v1", auth: client })
+        }
+        return cachedWriteGmail
+      })
+
+    const gmailReadCall = <A>(message: string, request: (gmail: gmail_v1.Gmail) => Promise<A>) =>
+      Effect.gen(function* () {
+        const gmail = yield* getReadGmail()
+        return yield* Effect.tryPromise({
+          try: () => request(gmail),
+          catch: (cause) => new GmailError({ message, cause }),
+        }).pipe(Effect.ensuring(flushTokenSave))
+      })
+
+    const gmailWriteCall = <A>(message: string, request: (gmail: gmail_v1.Gmail) => Promise<A>) =>
+      Effect.gen(function* () {
+        const gmail = yield* getWriteGmail()
         return yield* Effect.tryPromise({
           try: () => request(gmail),
           catch: (cause) => new GmailError({ message, cause }),
@@ -463,7 +485,7 @@ export const makeGmailService = (
     const sendEmail = (input: SendEmailInput): Effect.Effect<string, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
         const encodedMessage = encodeBase64Url(buildMimeMessage(input))
-        const response = yield* gmailCall("Failed to send email via Gmail API", (gmail) =>
+        const response = yield* gmailWriteCall("Failed to send email via Gmail API", (gmail) =>
           gmail.users.messages.send({
             userId: "me",
             requestBody: { raw: encodedMessage },
@@ -476,13 +498,15 @@ export const makeGmailService = (
       input: ReplyEmailInput,
     ): Effect.Effect<string, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const originalMessage = yield* gmailCall(`Failed to retrieve original message ${input.messageId}`, (gmail) =>
-          gmail.users.messages.get({
-            userId: "me",
-            id: input.messageId,
-            format: "metadata",
-            metadataHeaders: ["Subject", "From", "To", "Message-ID", "References"],
-          }),
+        const originalMessage = yield* gmailReadCall(
+          `Failed to retrieve original message ${input.messageId}`,
+          (gmail) =>
+            gmail.users.messages.get({
+              userId: "me",
+              id: input.messageId,
+              format: "metadata",
+              metadataHeaders: ["Subject", "From", "To", "Message-ID", "References"],
+            }),
         )
 
         const headers = originalMessage.data.payload?.headers
@@ -511,7 +535,7 @@ export const makeGmailService = (
           }),
         )
 
-        const response = yield* gmailCall("Failed to send reply via Gmail API", (gmail) =>
+        const response = yield* gmailWriteCall("Failed to send reply via Gmail API", (gmail) =>
           gmail.users.messages.send({
             userId: "me",
             requestBody: {
@@ -529,7 +553,7 @@ export const makeGmailService = (
     ): Effect.Effect<GmailDraftInfo, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
         const encodedMessage = encodeBase64Url(buildMimeMessage(input))
-        const response = yield* gmailCall("Failed to create draft via Gmail API", (gmail) =>
+        const response = yield* gmailWriteCall("Failed to create draft via Gmail API", (gmail) =>
           gmail.users.drafts.create({
             userId: "me",
             requestBody: {
@@ -598,7 +622,7 @@ export const makeGmailService = (
 
     const readMessage = (id: string): Effect.Effect<GmailMessageBody, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const detail = yield* gmailCall(`Failed to retrieve Gmail message ${id}`, (gmail) =>
+        const detail = yield* gmailReadCall(`Failed to retrieve Gmail message ${id}`, (gmail) =>
           gmail.users.messages.get({
             userId: "me",
             id,
@@ -634,7 +658,7 @@ export const makeGmailService = (
       attachmentId: string,
     ): Effect.Effect<Buffer, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const response = yield* gmailCall(
+        const response = yield* gmailWriteCall(
           `Failed to fetch attachment ${attachmentId} from message ${messageId}`,
           (gmail) =>
             gmail.users.messages.attachments.get({
@@ -656,7 +680,7 @@ export const makeGmailService = (
       id: string,
       removeLabelIds: readonly string[],
     ): Effect.Effect<void, GmailError | GmailConfigError | GmailAuthError> =>
-      gmailCall(`Failed to update Gmail message ${id}`, (gmail) =>
+      gmailWriteCall(`Failed to update Gmail message ${id}`, (gmail) =>
         gmail.users.messages.modify({
           userId: "me",
           id,
@@ -667,7 +691,7 @@ export const makeGmailService = (
     const archiveMessage = (id: string) => modifyMessageLabels(id, ["INBOX"])
 
     const trashMessage = (id: string): Effect.Effect<void, GmailError | GmailConfigError | GmailAuthError> =>
-      gmailCall(`Failed to move Gmail message ${id} to trash`, (gmail) =>
+      gmailWriteCall(`Failed to move Gmail message ${id} to trash`, (gmail) =>
         gmail.users.messages.trash({ userId: "me", id }),
       ).pipe(Effect.asVoid)
 
@@ -677,7 +701,7 @@ export const makeGmailService = (
       id: string,
     ): Effect.Effect<GmailUnsubscribeResult, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const detail = yield* gmailCall(`Failed to retrieve unsubscribe headers for Gmail message ${id}`, (gmail) =>
+        const detail = yield* gmailReadCall(`Failed to retrieve unsubscribe headers for Gmail message ${id}`, (gmail) =>
           gmail.users.messages.get({
             userId: "me",
             id,
@@ -789,7 +813,7 @@ export const makeGmailService = (
           "Content-Type": `multipart/mixed; boundary=${boundary}`,
         },
         body,
-        signal: AbortSignal.timeout(GMAIL_TIMEOUT_MS),
+        signal: AbortSignal.timeout(GMAIL_READ_TIMEOUT_MS),
       })
       if (!response.ok) return new Map()
       const raw = await response.text()
@@ -801,7 +825,7 @@ export const makeGmailService = (
     ): Effect.Effect<GmailMessageSummary[], GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
         const client = yield* ensureAuthorized()
-        const gmail = yield* getGmail()
+        const gmail = yield* getReadGmail()
         const targetCount = Math.max(0, options?.maxResults ?? 10)
         if (targetCount === 0) return []
 
@@ -856,8 +880,8 @@ export const makeGmailService = (
 
         const batchedDetails = new Map<number, gmail_v1.Schema$Message>()
         if (messages.length > 1) {
-          for (let offset = 0; offset < messages.length; offset += 100) {
-            const chunk = messages.slice(offset, offset + 100)
+          for (let offset = 0; offset < messages.length; offset += GMAIL_BATCH_CHUNK_SIZE) {
+            const chunk = messages.slice(offset, offset + GMAIL_BATCH_CHUNK_SIZE)
             const chunkMap = yield* Effect.tryPromise(() => fetchBatchDetails(client, chunk)).pipe(
               Effect.orElseSucceed(() => new Map<number, gmail_v1.Schema$Message>()),
               Effect.ensuring(flushTokenSave),
@@ -874,7 +898,7 @@ export const makeGmailService = (
             if (!message.id) return Effect.succeed(null)
             const messageId = message.id
             const fromBatch = batchedDetails.get(index)
-            if (fromBatch) {
+            if (fromBatch && fromBatch.id === messageId) {
               return Effect.succeed(toMessageSummary(messageId, message, fromBatch))
             }
 
@@ -897,7 +921,7 @@ export const makeGmailService = (
               Effect.map((detail) => toMessageSummary(messageId, message, detail.data)),
             )
           },
-          { concurrency: 20 },
+          { concurrency: GMAIL_FALLBACK_CONCURRENCY },
         ).pipe(Effect.ensuring(flushTokenSave))
 
         return summaries.filter((summary) => summary !== null)
@@ -905,7 +929,7 @@ export const makeGmailService = (
 
     const listLabels = (): Effect.Effect<GmailLabel[], GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const response = yield* gmailCall("Failed to list Gmail labels", (gmail) =>
+        const response = yield* gmailReadCall("Failed to list Gmail labels", (gmail) =>
           gmail.users.labels.list({ userId: "me" }),
         )
         return (response.data.labels ?? []).flatMap((label) =>
@@ -917,7 +941,7 @@ export const makeGmailService = (
 
     const createLabel = (name: string): Effect.Effect<GmailLabel, GmailError | GmailConfigError | GmailAuthError> =>
       Effect.gen(function* () {
-        const response = yield* gmailCall(`Failed to create Gmail label "${name}"`, (gmail) =>
+        const response = yield* gmailWriteCall(`Failed to create Gmail label "${name}"`, (gmail) =>
           gmail.users.labels.create({
             userId: "me",
             requestBody: { name, labelListVisibility: "labelShow", messageListVisibility: "show" },
@@ -944,7 +968,7 @@ export const makeGmailService = (
         if (lacksGrantedScope(client.credentials.scope, GMAIL_SETTINGS_SCOPE)) {
           return yield* missingSettingsScope()
         }
-        return yield* getGmail()
+        return yield* getReadGmail()
       })
 
     const settingsRequest = <A>(message: string, request: () => Promise<A>) =>

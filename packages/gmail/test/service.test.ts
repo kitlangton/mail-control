@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { ConfigProvider, Effect } from "effect"
@@ -169,6 +169,33 @@ describe("makeGmailService", () => {
 
       expect(error).toBeInstanceOf(GmailAuthError)
       expect(error.message).toContain("Missing OAuth token")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("tightens existing token file permissions to 0600 on refresh", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "mail-control-gmail-test-"))
+    try {
+      const credentialsPath = path.join(dir, "credentials.json")
+      const tokenPath = path.join(dir, "token.json")
+      await writeFile(
+        credentialsPath,
+        JSON.stringify({
+          installed: { client_id: "id", client_secret: "secret", redirect_uris: ["http://localhost"] },
+        }),
+        "utf8",
+      )
+      await writeFile(tokenPath, JSON.stringify({ refresh_token: "rt-1", access_token: "at-1" }), "utf8")
+      await chmod(tokenPath, 0o644)
+
+      const service = await Effect.runPromise(makeGmailService({ credentialsPath, tokenPath }))
+      const client = await Effect.runPromise(service.authorize())
+      client.emit("tokens", { access_token: "at-2" })
+      await new Promise((resolve) => setTimeout(resolve, 25))
+
+      const info = await stat(tokenPath)
+      expect(info.mode & 0o777).toBe(0o600)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
