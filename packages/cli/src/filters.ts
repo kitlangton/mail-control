@@ -10,10 +10,11 @@ import {
   type GmailServiceInterface,
 } from "@mail-control/gmail"
 import { Effect, Option } from "effect"
-import { Argument, Command, Flag } from "effect/unstable/cli"
+import { Argument, Command, Flag } from "effect/cli"
 import { requireAccount, withGmail } from "./account.js"
 import type { Accounts } from "./config.js"
 import { MailError } from "./errors.js"
+import { outputMode } from "./mode.js"
 import { Console } from "./output.js"
 import { printJson } from "./renderer.js"
 
@@ -242,10 +243,10 @@ const optionalText = (name: string, description: string) =>
 const toggle = (name: string, description: string) =>
   Flag.Boolean(name).pipe(Flag.withDefault(false), Flag.withDescription(description))
 
-const listCommand = Command.make("list", { account: accountOption, json: jsonOption }, ({ account, json }) =>
+const listCommand = Command.make("list", { account: accountOption, json: jsonOption }, ({ account, json: jsonFlag }) =>
   Effect.gen(function* () {
     const { filters, labels } = yield* listFilters(account)
-    if (json) {
+    if (jsonFlag || outputMode.json) {
       yield* printJson(
         filters.map((filter) => ({
           ...filter,
@@ -286,7 +287,7 @@ const createCommand = Command.make(
     dryRun: toggle("dry-run", "Print the filter request body without creating anything"),
     json: jsonOption,
   },
-  ({ account, dryRun, json, ...flags }) =>
+  ({ account, dryRun, json: jsonFlag, ...flags }) =>
     Effect.gen(function* () {
       const options: FilterOptions = {
         skipInbox: flags.skipInbox,
@@ -303,7 +304,7 @@ const createCommand = Command.make(
         ...Option.match(flags.label, { onNone: () => ({}), onSome: (label) => ({ label }) }),
       }
       const result = yield* createFilter(account, options, dryRun)
-      if (json) {
+      if (jsonFlag || outputMode.json) {
         yield* printJson(result)
         return
       }
@@ -324,10 +325,12 @@ const deleteCommand = Command.make(
     id: Argument.String("id").pipe(Argument.withDescription("Filter id (from `mail filters list`)")),
     json: jsonOption,
   },
-  ({ account, id, json }) =>
+  ({ account, id, json: jsonFlag }) =>
     Effect.gen(function* () {
       yield* deleteFilter(account, id)
-      yield* json ? printJson({ account, id, deleted: true }) : Console.log(`Deleted filter ${id}`)
+      yield* jsonFlag || outputMode.json
+        ? printJson({ account, id, deleted: true })
+        : Console.log(`Deleted filter ${id}`)
     }),
 ).pipe(Command.withDescription("Delete a Gmail filter"))
 

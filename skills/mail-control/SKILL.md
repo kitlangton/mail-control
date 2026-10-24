@@ -52,7 +52,11 @@ mail read -a personal <message-id>
 mail read -a icloud --mailbox "Sent Messages" <message-id>
 ```
 
-Use `--json` for machine-readable output from `list`, `search`, `recent`, `read`, `download`, and mutation commands. Prefer JSON for scripts instead of parsing pretty terminal output.
+Use `--json` for machine-readable output from `list`, `search`, `recent`, `read`, `download`, and mutation commands. Prefer JSON for scripts instead of parsing pretty terminal output. `--json` may go anywhere on the line and keeps the original shapes (a bare array for `list`/`search`/`recent`).
+
+`--envelope` prints the shared control-contract envelope instead: `{ ok, command, checkedAt, items, coverage, warnings, readOnly, readEffects }` (`read` puts the message in `items[0]`). With `-a all`, an account that fails is never dropped silently: it prints `mail: warning: <account>: <reason>` on stderr, and the envelope reports it in `warnings` with `coverage: "partial"`. If every account fails, the command fails.
+
+In JSON mode failures print `{ ok: false, command, error: { code, message, exitCode } }`. Exit codes: 2 usage, 3 auth or setup (`mail auth <id>`), 4 network, 1 anything else.
 
 JSON and text output drain before exit, including bodies larger than the pipe buffer.
 Expired Gmail authorization reports the account-specific `mail auth <id>` command.

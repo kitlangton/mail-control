@@ -1,4 +1,4 @@
-import { Effect, Exit, FileSystem, Path } from "effect"
+import { Cause, Effect, Exit, FileSystem, Option, Path } from "effect"
 import { type AccountEnv, requireAccount, withAccount } from "./account.js"
 import {
   type ForwardComposeInput,
@@ -90,43 +90,72 @@ const sortNewestFirst = (messages: readonly MailMessageSummary[]) =>
     return timeB - timeA
   })
 
-export const mergeAccountListResults = (
-  results: readonly Exit.Exit<readonly MailMessageSummary[], MailError>[],
-  maxResults: number,
-): Effect.Effect<readonly MailMessageSummary[], MailError> => {
-  const messages = results.flatMap((result) => (Exit.isSuccess(result) ? result.value : []))
-
-  if (messages.length === 0 && results.every((result) => Exit.isFailure(result))) {
-    return Effect.fail(new MailError({ message: "Failed to list messages from every account." }))
-  }
-
-  return Effect.succeed(sortNewestFirst(messages).slice(0, maxResults))
+export interface ListReport {
+  readonly messages: readonly MailMessageSummary[]
+  /** One line per account that failed, e.g. `icloud: Sign in again: run mail auth icloud`. */
+  readonly warnings: readonly string[]
 }
 
-export const listMessages = (input: ListInput): Effect.Effect<readonly MailMessageSummary[], MailError, AccountEnv> =>
+export interface AccountListResult {
+  readonly account: string
+  readonly exit: Exit.Exit<readonly MailMessageSummary[], MailError>
+}
+
+/** Keep the accounts that answered, but report each failed account instead of dropping it silently. */
+export const mergeAccountListResults = (
+  results: readonly AccountListResult[],
+  maxResults: number,
+): Effect.Effect<ListReport, MailError> => {
+  const messages = results.flatMap(({ exit }) => (Exit.isSuccess(exit) ? exit.value : []))
+  const warnings = results.flatMap(({ account, exit }) =>
+    Exit.isFailure(exit) ? [`${account}: ${failureMessage(exit)}`] : [],
+  )
+
+  if (results.length > 0 && warnings.length === results.length) {
+    return Effect.fail(
+      new MailError({ message: `Failed to list messages from every account (${warnings.join("; ")})` }),
+    )
+  }
+
+  return Effect.succeed({ messages: sortNewestFirst(messages).slice(0, maxResults), warnings })
+}
+
+const failureMessage = (exit: Exit.Exit<unknown, MailError>) =>
+  Exit.isFailure(exit)
+    ? Option.match(Cause.findErrorOption(exit.cause), {
+        onNone: () => "unexpected failure",
+        onSome: (error) => error.message,
+      })
+    : ""
+
+export const listMessagesReport = (input: ListInput): Effect.Effect<ListReport, MailError, AccountEnv> =>
   Effect.gen(function* () {
     const base = baseOptionsFrom(input)
 
     if (input.account !== "all") {
       const account = yield* requireAccount(input.account, "read", "Listing messages")
-      return yield* listForAccount(account, optionsFor(account, base, input.scope))
+      return { messages: yield* listForAccount(account, optionsFor(account, base, input.scope)), warnings: [] }
     }
 
     const accounts = yield* Accounts
     const results = yield* Effect.forEach(
       accounts.all,
-      (account) => Effect.exit(listForAccount(account, optionsFor(account, base, input.scope))),
+      (account) =>
+        Effect.exit(listForAccount(account, optionsFor(account, base, input.scope))).pipe(
+          Effect.map((exit) => ({ account: account.id, exit })),
+        ),
       { concurrency: "unbounded" },
     )
     return yield* mergeAccountListResults(results, input.maxResults)
   })
 
-export const recentMessages = (
-  input: RecentInput,
-): Effect.Effect<readonly MailMessageSummary[], MailError, AccountEnv> =>
+export const listMessages = (input: ListInput): Effect.Effect<readonly MailMessageSummary[], MailError, AccountEnv> =>
+  listMessagesReport(input).pipe(Effect.map((report) => report.messages))
+
+export const recentMessagesReport = (input: RecentInput): Effect.Effect<ListReport, MailError, AccountEnv> =>
   Effect.gen(function* () {
     const since = yield* parseDuration(input.since, "--since")
-    const messages = yield* listMessages({
+    const report = yield* listMessagesReport({
       account: input.account,
       maxResults: input.maxResults,
       status: input.status,
@@ -135,8 +164,13 @@ export const recentMessages = (
       ...(input.mailbox !== undefined ? { mailbox: input.mailbox } : {}),
     })
 
-    return messages.filter((message) => isOnOrAfter(message.date, since.sinceDate))
+    return { ...report, messages: report.messages.filter((message) => isOnOrAfter(message.date, since.sinceDate)) }
   })
+
+export const recentMessages = (
+  input: RecentInput,
+): Effect.Effect<readonly MailMessageSummary[], MailError, AccountEnv> =>
+  recentMessagesReport(input).pipe(Effect.map((report) => report.messages))
 
 export const readMessage = (input: ReadInput): Effect.Effect<MailMessageBody, MailError, AccountEnv> =>
   Effect.gen(function* () {

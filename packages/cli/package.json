@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
-    "@effect/sql-sqlite-bun": "4.0.0-rc.115",
+    "@effect/sql-sqlite-bun": "4.0.6",
     "@mail-control/gmail": "workspace:*",
     "@opentui/core": "0.4.2",
     "@opentui/react": "0.4.2",

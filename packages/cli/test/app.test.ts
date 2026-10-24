@@ -12,18 +12,22 @@ const summary = (overrides: Partial<MailMessageSummary>): MailMessageSummary => 
 })
 
 describe("mergeAccountListResults", () => {
-  it("returns successful account results when another account fails", async () => {
+  it("returns successful account results and warns about the account that failed", async () => {
     const result = await Effect.runPromise(
       mergeAccountListResults(
         [
-          Exit.succeed([summary({ id: "gmail-1", date: "Mon, 29 Jun 2026 12:00:00 +0000" })]),
-          Exit.fail(new MailError({ message: "iCloud config missing" })),
+          {
+            account: "gmail",
+            exit: Exit.succeed([summary({ id: "gmail-1", date: "Mon, 29 Jun 2026 12:00:00 +0000" })]),
+          },
+          { account: "icloud", exit: Exit.fail(new MailError({ message: "iCloud config missing" })) },
         ],
         10,
       ),
     )
 
-    expect(result.map((message) => message.id)).toEqual(["gmail-1"])
+    expect(result.messages.map((message) => message.id)).toEqual(["gmail-1"])
+    expect(result.warnings).toEqual(["icloud: iCloud config missing"])
   })
 
   it("fails when every account fails", async () => {
@@ -31,8 +35,8 @@ describe("mergeAccountListResults", () => {
       Effect.runPromise(
         mergeAccountListResults(
           [
-            Exit.fail(new MailError({ message: "gmail failed" })),
-            Exit.fail(new MailError({ message: "icloud failed" })),
+            { account: "gmail", exit: Exit.fail(new MailError({ message: "gmail failed" })) },
+            { account: "icloud", exit: Exit.fail(new MailError({ message: "icloud failed" })) },
           ],
           10,
         ),

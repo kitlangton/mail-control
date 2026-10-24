@@ -1,27 +1,30 @@
 import { NodeRuntime } from "@effect/platform-node"
 import { authorizeGmail } from "@mail-control/gmail"
-import { Effect, FileSystem, Option, Redacted } from "effect"
-import { Argument, Command, Flag } from "effect/unstable/cli"
+import { Effect, Console as EffectConsole, FileSystem, Option, Redacted } from "effect"
+import { Argument, CliError, Command, Flag } from "effect/cli"
 import { type AccountEnv, gmailAccountPaths, withAccount } from "./account.js"
 import {
   archiveMessage,
   downloadAttachments,
   forwardMessage,
-  listMessages,
+  type ListReport,
+  listMessagesReport,
   type MutationInput,
   markMessageRead,
   readMessage,
-  recentMessages,
+  recentMessagesReport,
   replyToMessage,
   sendMessage,
   trashMessage,
   unsubscribeFromMessage,
 } from "./app.js"
 import { Accounts } from "./config.js"
-import { MailError, toMailError } from "./errors.js"
+import { ExitCode, envelope, failure } from "./control-contract.js"
+import { type MailConfigError, MailError, toMailError } from "./errors.js"
 import { filtersCommand } from "./filters.js"
 import { makeICloudService } from "./icloud.js"
 import { mailLayer } from "./layers.js"
+import { outputMode } from "./mode.js"
 import { Console } from "./output.js"
 import { printDownloadResult, printJson, printMessage, printSummaries } from "./renderer.js"
 import { Secrets, writeAppPassword } from "./secrets.js"
@@ -51,8 +54,25 @@ const unreadOption = Flag.Boolean("unread").pipe(
 const readOption = Flag.Boolean("read").pipe(Flag.withDefault(false), Flag.withDescription("Only show read messages"))
 const jsonOption = Flag.Boolean("json").pipe(
   Flag.withDefault(false),
-  Flag.withDescription("Print machine-readable JSON"),
+  Flag.withDescription("Print machine-readable JSON (--envelope for the control-contract envelope)"),
 )
+const envelopeOption = Flag.Boolean("envelope").pipe(
+  Flag.withDefault(false),
+  Flag.withDescription("Print the control-contract envelope { ok, items, coverage, warnings, ... }"),
+)
+
+/** Failed accounts always reach stderr; the envelope also carries them as warnings with partial coverage. */
+const printList = (name: string, report: ListReport) =>
+  Effect.gen(function* () {
+    for (const warning of report.warnings) yield* Console.error(`mail: warning: ${warning}`)
+    if (outputMode.envelope)
+      return yield* printJson(envelope(`mail ${name}`, report.messages, { warnings: report.warnings }))
+    if (outputMode.json) return yield* printJson(report.messages)
+    yield* printSummaries(report.messages)
+  })
+
+const printResult = (name: string, value: unknown, readOnly: boolean) =>
+  outputMode.envelope ? printJson(envelope(`mail ${name}`, [value], { readOnly })) : printJson(value)
 
 const sinceOption = Flag.String("since").pipe(
   Flag.withDefault("24h"),
@@ -180,12 +200,13 @@ const listCommand = Command.make(
     read: readOption,
     mailbox: mailboxOption,
     json: jsonOption,
+    envelope: envelopeOption,
   },
-  ({ account, max, query, unread, read, mailbox, json }) =>
+  ({ account, max, query, unread, read, mailbox }) =>
     Effect.gen(function* () {
       const queryValue = opt(query)
       const mailboxValue = opt(mailbox)
-      const messages = yield* listMessages({
+      const report = yield* listMessagesReport({
         account,
         maxResults: maxResultsFrom(max),
         status: yield* resolveStatus(read, unread),
@@ -193,7 +214,7 @@ const listCommand = Command.make(
         ...(queryValue !== undefined ? { query: queryValue } : {}),
         ...(mailboxValue !== undefined ? { mailbox: mailboxValue } : {}),
       })
-      yield* json ? printJson(messages) : printSummaries(messages)
+      yield* printList("list", report)
     }),
 )
 
@@ -207,11 +228,12 @@ const searchCommand = Command.make(
     read: readOption,
     mailbox: mailboxOption,
     json: jsonOption,
+    envelope: envelopeOption,
   },
-  ({ account, query, max, unread, read, mailbox, json }) =>
+  ({ account, query, max, unread, read, mailbox }) =>
     Effect.gen(function* () {
       const mailboxValue = opt(mailbox)
-      const messages = yield* listMessages({
+      const report = yield* listMessagesReport({
         account,
         maxResults: maxResultsFrom(max),
         status: yield* resolveStatus(read, unread),
@@ -219,7 +241,7 @@ const searchCommand = Command.make(
         scope: "search",
         ...(mailboxValue !== undefined ? { mailbox: mailboxValue } : {}),
       })
-      yield* json ? printJson(messages) : printSummaries(messages)
+      yield* printList("search", report)
     }),
 )
 
@@ -234,12 +256,13 @@ const recentCommand = Command.make(
     read: readOption,
     mailbox: mailboxOption,
     json: jsonOption,
+    envelope: envelopeOption,
   },
-  ({ account, since, max, query, unread, read, mailbox, json }) =>
+  ({ account, since, max, query, unread, read, mailbox }) =>
     Effect.gen(function* () {
       const queryValue = opt(query)
       const mailboxValue = opt(mailbox)
-      const messages = yield* recentMessages({
+      const report = yield* recentMessagesReport({
         account,
         since,
         maxResults: maxResultsFrom(max),
@@ -247,7 +270,7 @@ const recentCommand = Command.make(
         ...(queryValue !== undefined ? { query: queryValue } : {}),
         ...(mailboxValue !== undefined ? { mailbox: mailboxValue } : {}),
       })
-      yield* json ? printJson(messages) : printSummaries(messages)
+      yield* printList("recent", report)
     }),
 )
 
@@ -258,8 +281,9 @@ const readCommand = Command.make(
     id: Argument.String("id").pipe(Argument.withDescription("Message id")),
     mailbox: mailboxOption,
     json: jsonOption,
+    envelope: envelopeOption,
   },
-  ({ account, id, mailbox, json }) =>
+  ({ account, id, mailbox }) =>
     Effect.gen(function* () {
       const mailboxValue = opt(mailbox)
       const message = yield* readMessage({
@@ -267,7 +291,7 @@ const readCommand = Command.make(
         id,
         ...(mailboxValue !== undefined ? { mailbox: mailboxValue } : {}),
       })
-      yield* json ? printJson(message) : printMessage(message)
+      yield* outputMode.json ? printResult("read", message, true) : printMessage(message)
     }),
 )
 
@@ -376,11 +400,12 @@ const downloadCommand = Command.make(
     id: Argument.String("id").pipe(Argument.withDescription("Message id")),
     outputDir: outputDirOption,
     json: jsonOption,
+    envelope: envelopeOption,
   },
-  ({ account, id, outputDir, json }) =>
+  ({ account, id, outputDir }) =>
     Effect.gen(function* () {
       const result = yield* downloadAttachments({ account, id, outputDir })
-      yield* json ? printJson(result) : printDownloadResult(result)
+      yield* outputMode.json ? printResult("download", result, false) : printDownloadResult(result)
     }),
 )
 
@@ -395,12 +420,13 @@ const mutationCommand = <A>(
       account: accountOption,
       id: Argument.String("id").pipe(Argument.withDescription("Message id")),
       json: jsonOption,
+      envelope: envelopeOption,
     },
-    ({ account, id, json }) =>
+    ({ account, id }) =>
       Effect.gen(function* () {
         const result = yield* run({ account, id })
-        if (json) {
-          yield* printJson({ account, id, result })
+        if (outputMode.json) {
+          yield* printResult(name, { account, id, result }, false)
           return
         }
         const detail = typeof result === "string" ? ` via ${result}` : ""
@@ -533,14 +559,55 @@ const cli = Command.runWith(root, {
   version: "0.2.0",
 })
 
-// Print expected failures (bad account, missing config/token, provider errors)
-// as a clean one-line message instead of a stack trace.
-const reportFailure = (error: { readonly message: string }) =>
-  Console.error(`mail: ${error.message}`).pipe(Effect.andThen(Effect.sync(() => (process.exitCode = 1))))
+const exitCodeFor = (message: string, config: boolean): number => {
+  if (config || /mail auth|sign in|token|credential|app password|invalid_grant/i.test(message)) return ExitCode.auth
+  if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|network|timed out/i.test(message)) return ExitCode.host
+  if (/--|requires a specific --account|cannot both be specified|must be provided|is required/i.test(message))
+    return ExitCode.usage
+  return ExitCode.failure
+}
 
-export const program = cli(process.argv.slice(2)).pipe(
+const commandName = () => {
+  const name = outputMode.argv.find((arg) => !arg.startsWith("-"))
+  return name ? `mail ${name}` : "mail"
+}
+
+// Print expected failures (bad account, missing config/token, provider errors)
+// as a clean one-line message instead of a stack trace, or a failure envelope in JSON mode.
+const reportFailure = (error: MailError | MailConfigError) =>
+  Effect.gen(function* () {
+    const exitCode = exitCodeFor(error.message, error._tag === "MailConfigError")
+    const code =
+      exitCode === ExitCode.auth
+        ? "auth"
+        : exitCode === ExitCode.host
+          ? "host"
+          : exitCode === ExitCode.usage
+            ? "usage"
+            : "error"
+    if (outputMode.json) yield* printJson(failure(commandName(), code, error.message, { exitCode }))
+    else yield* Console.error(`mail: ${error.message}`)
+    process.exitCode = exitCode
+  })
+
+// Effect CLI prints usage help itself; only set the exit code (and the envelope in JSON mode).
+const reportUsage = (error: CliError.CliError) =>
+  Effect.gen(function* () {
+    const errors = error._tag === "ShowHelp" ? error.errors : [error]
+    if (errors.length === 0) return
+    const message = errors.map((e) => e.message).join("; ")
+    if (outputMode.json) yield* printJson(failure(commandName(), "usage", message, { exitCode: ExitCode.usage }))
+    process.exitCode = ExitCode.usage
+  })
+
+export const program = cli(outputMode.argv).pipe(
   Effect.provide(mailLayer),
   Effect.catchTags({ MailError: reportFailure, MailConfigError: reportFailure }),
+  Effect.catchIf(CliError.isCliError, reportUsage),
+  // JSON output goes through printJson; keep Effect CLI's help text off stdout.
+  outputMode.json
+    ? Effect.provideService(EffectConsole.Console, { ...globalThis.console, log: globalThis.console.error })
+    : (effect) => effect,
 )
 
 if (import.meta.url === `file://${process.argv[1]}`) {
