@@ -70,6 +70,12 @@ const resolveRecipient = Effect.fn("Mail.resolveRecipient")(function* (recipient
     try: () => JSON.parse(result.stdout) as unknown,
     catch: (cause) => new MailError({ message: `Invalid contact data for '${recipient}'`, cause }),
   }).pipe(
+    // contacts-control prints the control envelope ({ ok, items: [contact] }); older builds print the contact.
+    Effect.map((value) =>
+      value !== null && typeof value === "object" && "items" in value && Array.isArray(value.items)
+        ? value.items[0]
+        : value,
+    ),
     Effect.flatMap(Schema.decodeUnknownEffect(Contact)),
     Effect.mapError((cause) => new MailError({ message: `Invalid contact data for '${recipient}'`, cause })),
   )
