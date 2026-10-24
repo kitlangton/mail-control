@@ -184,6 +184,8 @@ machine-readable output. Use `-f/--body-file` for long message bodies.
 Capabilities are determined by account **type**: Gmail supports every command,
 including `filters`; iCloud supports read, send, archive, trash, mark-read, and
 unsubscribe (for messages that expose standards-based `List-Unsubscribe` headers).
+On iCloud, `recent` and `search` (without `--mailbox`) search both `INBOX` and
+`Archive` and prefix non-INBOX IDs with the mailbox (e.g. `Archive:1370`).
 
 ## Security notes
 

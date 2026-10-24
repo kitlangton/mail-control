@@ -101,6 +101,7 @@ interface Envelope {
   subject?: string | undefined
   from?: { name?: string | undefined; address?: string | undefined }[] | undefined
   date?: Date | string | undefined
+  messageId?: string | undefined
 }
 
 /** Shared envelope → display fields, used by both list and read. */
@@ -116,7 +117,12 @@ const envelopeFields = (envelope: Envelope | undefined, flags: Set<string> | und
   }
 }
 
-const QUERY_TOKEN_PATTERN = /([a-z_]+):(?:"([^"]+)"|(\S+))|"([^"]+)"|(\S+)/gi
+const QUERY_TOKEN_PATTERN = /([a-z_]+):(?:"([^"]*)"|(\S*))|"([^"]+)"|(\S+)/gi
+
+const parseOperatorDuration = (value: string, now: Date) => {
+  const normalized = /^\d+\s*m$/i.test(value.trim()) ? `${value.trim()}o` : value
+  return parseDurationText(normalized, now)
+}
 
 export const buildSearchCriteria = (options?: ListMailOptions, now = new Date()): Record<string, unknown> => {
   const status = options?.status ?? "all"
@@ -129,23 +135,30 @@ export const buildSearchCriteria = (options?: ListMailOptions, now = new Date())
   const rawQuery = options?.query?.trim()
   if (!rawQuery) return criteria
 
+  const fromValues: string[] = []
+  const toValues: string[] = []
+  const subjectValues: string[] = []
   const freeTerms: string[] = []
+
   for (const match of rawQuery.matchAll(QUERY_TOKEN_PATTERN)) {
     const key = match[1]?.toLowerCase()
     const val = match[2] ?? match[3] ?? ""
     const phrase = match[4] ?? match[5] ?? ""
 
-    if (key && val) {
+    if (key !== undefined) {
+      if (!val) {
+        throw new MailError({ message: `Empty value for iCloud search operator "${key}:"` })
+      }
       if (key === "from") {
-        criteria.from = val
+        fromValues.push(val)
         continue
       }
       if (key === "to") {
-        criteria.to = val
+        toValues.push(val)
         continue
       }
       if (key === "subject") {
-        criteria.subject = val
+        subjectValues.push(val)
         continue
       }
       if (key === "is") {
@@ -158,39 +171,86 @@ export const buildSearchCriteria = (options?: ListMailOptions, now = new Date())
           criteria.seen = true
           continue
         }
+        throw new MailError({
+          message: `Unsupported iCloud search operator "is:${val}" (supported: is:unread, is:read)`,
+        })
       }
       if (key === "newer_than") {
-        const parsed = parseDurationText(val, now)
-        if (parsed) {
-          criteria.since = parsed.sinceDate
-          continue
+        const parsed = parseOperatorDuration(val, now)
+        if (!parsed) {
+          throw new MailError({ message: `Invalid duration in iCloud search operator "newer_than:${val}"` })
         }
+        criteria.since = parsed.sinceDate
+        continue
       }
       if (key === "older_than") {
-        const parsed = parseDurationText(val, now)
-        if (parsed) {
-          criteria.before = parsed.sinceDate
-          continue
+        const parsed = parseOperatorDuration(val, now)
+        if (!parsed) {
+          throw new MailError({ message: `Invalid duration in iCloud search operator "older_than:${val}"` })
         }
+        criteria.before = parsed.sinceDate
+        continue
       }
-      freeTerms.push(match[0])
-    } else if (phrase) {
+      throw new MailError({
+        message: `Unsupported iCloud search operator "${key}:" (supported: from:, to:, subject:, is:unread, is:read, newer_than:, older_than:)`,
+      })
+    }
+
+    if (phrase) {
+      if (match[5] === "OR") continue
       freeTerms.push(phrase)
     }
   }
 
+  const orClauses: Record<string, unknown>[][] = []
+
+  if (toValues.length === 1) criteria.to = toValues[0]
+  else if (toValues.length > 1) orClauses.push(toValues.map((to) => ({ to })))
+
+  if (subjectValues.length === 1) criteria.subject = subjectValues[0]
+  else if (subjectValues.length > 1) orClauses.push(subjectValues.map((subject) => ({ subject })))
+
+  if (fromValues.length === 1) criteria.from = fromValues[0]
+  else if (fromValues.length > 1) orClauses.push(fromValues.map((from) => ({ from })))
+
   if (freeTerms.length > 0) {
     const text = freeTerms.join(" ")
-    criteria.or = [{ subject: text }, { from: text }]
+    orClauses.push([{ subject: text }, { from: text }])
+  }
+
+  if (orClauses.length === 1) {
+    criteria.or = orClauses[0]
+  } else if (orClauses.length > 1) {
+    let combined = orClauses[0] ?? []
+    for (const nextClause of orClauses.slice(1)) {
+      combined = combined.map((existing) => ({ ...existing, or: nextClause }))
+    }
+    criteria.or = combined
   }
 
   return criteria
 }
 
-const parseUid = (id: string): Effect.Effect<number, MailError> => {
-  const uid = Number(id)
+export const formatICloudMessageId = (mailbox: string, uid: number, defaultMailbox = "INBOX"): string =>
+  mailbox === defaultMailbox ? String(uid) : `${mailbox}:${uid}`
+
+export const parseICloudMessageId = (
+  id: string,
+  defaultMailbox = "INBOX",
+): Effect.Effect<{ readonly mailbox: string; readonly uid: number }, MailError> => {
+  const trimmed = id.trim()
+  const colonIndex = trimmed.lastIndexOf(":")
+  if (colonIndex > 0) {
+    const mailbox = trimmed.slice(0, colonIndex).trim()
+    const uid = Number(trimmed.slice(colonIndex + 1).trim())
+    if (mailbox.length > 0 && Number.isSafeInteger(uid) && uid > 0) {
+      return Effect.succeed({ mailbox, uid })
+    }
+    return Effect.fail(new MailError({ message: `Invalid iCloud message ID "${id}"` }))
+  }
+  const uid = Number(trimmed)
   return Number.isSafeInteger(uid) && uid > 0
-    ? Effect.succeed(uid)
+    ? Effect.succeed({ mailbox: defaultMailbox, uid })
     : Effect.fail(new MailError({ message: `Invalid iCloud message ID "${id}"` }))
 }
 
@@ -291,46 +351,96 @@ export const makeICloudService = (
   }
 
   const listMessages = (options?: ListMailOptions) =>
-    withClient(
-      (client, mailbox) =>
-        Effect.tryPromise({
-          try: async () => {
-            const box = await client.mailboxOpen(mailbox, { readOnly: true })
-            const limit = options?.maxResults ?? 10
-            if (box.exists === 0 || limit <= 0) return []
+    Effect.gen(function* () {
+      const criteria = yield* Effect.try({
+        try: () => buildSearchCriteria(options),
+        catch: mailError("Failed to list iCloud messages"),
+      })
+      const defaultBox = config.imap.mailbox
+      const mailboxes =
+        options?.mailbox !== undefined
+          ? [options.mailbox]
+          : options?.inboxOnly === false && defaultBox !== "Archive"
+            ? [defaultBox, "Archive"]
+            : [defaultBox]
 
-            const results = await client.search(buildSearchCriteria(options) as Parameters<ImapFlow["search"]>[0], {
-              uid: true,
-            })
-            const ids = Array.isArray(results) ? results : []
-            if (ids.length === 0) return []
-            const target = [...ids].sort((a, b) => a - b).slice(-limit)
+      return yield* withClient(
+        (client) =>
+          Effect.tryPromise({
+            try: async () => {
+              const limit = options?.maxResults ?? 10
+              if (limit <= 0) return []
+              const seenMessageIds = new Set<string>()
+              const collected: { summary: MailMessageSummary; uid: number }[] = []
 
-            const summaries: MailMessageSummary[] = []
-            for await (const rawMessage of client.fetch(target, { envelope: true, flags: true }, { uid: true })) {
-              const message = rawMessage as { uid: number; envelope?: Envelope; flags?: Set<string> }
-              summaries.push({
-                account: accountId,
-                id: String(message.uid),
-                snippet: "",
-                ...envelopeFields(message.envelope, message.flags),
-              })
-            }
-            return summaries.reverse()
-          },
-          catch: mailError("Failed to list iCloud messages"),
-        }),
-      { ...(options?.mailbox !== undefined ? { mailbox: options.mailbox } : {}), readOnly: true },
-    )
+              for (const boxName of mailboxes) {
+                const box = await client.mailboxOpen(boxName, { readOnly: true })
+                if (box.exists === 0) continue
+
+                const results = await client.search(criteria as Parameters<ImapFlow["search"]>[0], {
+                  uid: true,
+                })
+                if (results === false) {
+                  throw new Error(`IMAP search failed in mailbox "${boxName}"`)
+                }
+                const ids = Array.isArray(results) ? results : []
+                if (ids.length === 0) continue
+                const target = [...ids].sort((a, b) => a - b).slice(-limit)
+
+                const boxSummaries: {
+                  summary: MailMessageSummary
+                  uid: number
+                  messageId?: string | undefined
+                }[] = []
+                for await (const rawMessage of client.fetch(target, { envelope: true, flags: true }, { uid: true })) {
+                  const message = rawMessage as { uid: number; envelope?: Envelope; flags?: Set<string> }
+                  boxSummaries.push({
+                    uid: message.uid,
+                    messageId: message.envelope?.messageId,
+                    summary: {
+                      account: accountId,
+                      id: formatICloudMessageId(boxName, message.uid, defaultBox),
+                      snippet: "",
+                      ...envelopeFields(message.envelope, message.flags),
+                    },
+                  })
+                }
+
+                for (const item of boxSummaries.reverse()) {
+                  const msgId = item.messageId?.trim()
+                  if (msgId) {
+                    if (seenMessageIds.has(msgId)) continue
+                    seenMessageIds.add(msgId)
+                  }
+                  collected.push({ summary: item.summary, uid: item.uid })
+                }
+              }
+
+              if (mailboxes.length > 1) {
+                collected.sort((a, b) => {
+                  const timeA = a.summary.date ? Date.parse(a.summary.date) : 0
+                  const timeB = b.summary.date ? Date.parse(b.summary.date) : 0
+                  return timeB !== timeA ? timeB - timeA : b.uid - a.uid
+                })
+              }
+
+              return collected.slice(0, limit).map((item) => item.summary)
+            },
+            catch: mailError("Failed to list iCloud messages"),
+          }),
+        { ...(options?.mailbox !== undefined ? { mailbox: options.mailbox } : {}), readOnly: true },
+      )
+    })
 
   const readMessage = (input: ReadMailInput) =>
     Effect.gen(function* () {
-      const uid = yield* parseUid(input.id)
+      const defaultBox = config.imap.mailbox
+      const { mailbox, uid } = yield* parseICloudMessageId(input.id, input.mailbox ?? defaultBox)
       return yield* withClient(
-        (client, mailbox) =>
+        (client, targetMailbox) =>
           Effect.tryPromise({
             try: async () => {
-              await client.mailboxOpen(mailbox, { readOnly: true })
+              await client.mailboxOpen(targetMailbox, { readOnly: true })
               const rawMessage = await client.fetchOne(
                 uid,
                 { envelope: true, flags: true, bodyParts: ["TEXT"] },
@@ -339,7 +449,7 @@ export const makeICloudService = (
               if (!rawMessage) return undefined
               const bodyBuffer = rawMessage.bodyParts?.get("TEXT") ?? rawMessage.bodyParts?.values().next().value
               return {
-                id: String(rawMessage.uid),
+                id: formatICloudMessageId(targetMailbox, rawMessage.uid, defaultBox),
                 ...envelopeFields(rawMessage.envelope, rawMessage.flags),
                 body: bodyBuffer ? bodyBuffer.toString("utf8") : "",
               } satisfies MailMessageBody
@@ -352,7 +462,7 @@ export const makeICloudService = (
                 : Effect.succeed(message),
             ),
           ),
-        { ...(input.mailbox !== undefined ? { mailbox: input.mailbox } : {}), readOnly: true },
+        { mailbox, readOnly: true },
       )
     })
 
@@ -365,7 +475,6 @@ export const makeICloudService = (
           secure: config.smtp.secure,
           connectionTimeout: IMAP_CONNECTION_TIMEOUT_MS,
           greetingTimeout: IMAP_GREETING_TIMEOUT_MS,
-          socketTimeout: IMAP_SOCKET_TIMEOUT_MS,
           auth: { user: config.email, pass: Redacted.value(config.password) },
         })
         await transporter.sendMail({
@@ -383,17 +492,33 @@ export const makeICloudService = (
 
   const moveToSpecialUse = (messageId: string, specialUse: "\\Archive" | "\\Trash", fallback: string, verb: string) =>
     Effect.gen(function* () {
-      const uid = yield* parseUid(messageId)
-      yield* withClient((client, mailbox) =>
-        Effect.tryPromise({
-          try: async () => {
-            await client.mailboxOpen(mailbox)
-            const mailboxes = await client.list()
-            const destination = mailboxes.find((candidate) => candidate.specialUse === specialUse)
-            await client.messageMove({ uid }, destination?.path ?? fallback, { uid: true })
-          },
-          catch: mailError(`Failed to ${verb} iCloud message ${messageId}`),
-        }),
+      const { mailbox, uid } = yield* parseICloudMessageId(messageId, config.imap.mailbox)
+      yield* withClient(
+        (client, targetMailbox) =>
+          Effect.tryPromise({
+            try: async () => {
+              await client.mailboxOpen(targetMailbox)
+              const existing = await client.fetchOne(uid, { uid: true }, { uid: true })
+              if (!existing) {
+                throw new Error(`No iCloud message found with id ${messageId}`)
+              }
+              const mailboxes = await client.list()
+              const destination = mailboxes.find((candidate) => candidate.specialUse === specialUse)?.path ?? fallback
+              if (destination === targetMailbox) return
+              const moved = await client.messageMove({ uid }, destination, { uid: true })
+              if (
+                !moved ||
+                (typeof moved === "object" &&
+                  "uidMap" in moved &&
+                  moved.uidMap instanceof Map &&
+                  moved.uidMap.size === 0)
+              ) {
+                throw new Error(`No iCloud message moved for id ${messageId}`)
+              }
+            },
+            catch: mailError(`Failed to ${verb} iCloud message ${messageId}`),
+          }),
+        { mailbox },
       )
     })
 
@@ -403,26 +528,35 @@ export const makeICloudService = (
 
   const markMessageRead = (messageId: string) =>
     Effect.gen(function* () {
-      const uid = yield* parseUid(messageId)
-      yield* withClient((client, mailbox) =>
-        Effect.tryPromise({
-          try: async () => {
-            await client.mailboxOpen(mailbox)
-            await client.messageFlagsAdd({ uid }, ["\\Seen"], { uid: true })
-          },
-          catch: mailError(`Failed to mark iCloud message ${messageId} read`),
-        }),
+      const { mailbox, uid } = yield* parseICloudMessageId(messageId, config.imap.mailbox)
+      yield* withClient(
+        (client, targetMailbox) =>
+          Effect.tryPromise({
+            try: async () => {
+              await client.mailboxOpen(targetMailbox)
+              const existing = await client.fetchOne(uid, { uid: true }, { uid: true })
+              if (!existing) {
+                throw new Error(`No iCloud message found with id ${messageId}`)
+              }
+              const updated = await client.messageFlagsAdd({ uid }, ["\\Seen"], { uid: true })
+              if (!updated) {
+                throw new Error(`Failed to update flags for iCloud message ${messageId}`)
+              }
+            },
+            catch: mailError(`Failed to mark iCloud message ${messageId} read`),
+          }),
+        { mailbox },
       )
     })
 
   const unsubscribeFromMessage = (messageId: string): Effect.Effect<ICloudUnsubscribeResult, MailError> =>
     Effect.gen(function* () {
-      const uid = yield* parseUid(messageId)
+      const { mailbox, uid } = yield* parseICloudMessageId(messageId, config.imap.mailbox)
       const message = yield* withClient(
-        (client, mailbox) =>
+        (client, targetMailbox) =>
           Effect.tryPromise({
             try: async () => {
-              await client.mailboxOpen(mailbox, { readOnly: true })
+              await client.mailboxOpen(targetMailbox, { readOnly: true })
               const message = await client.fetchOne(
                 uid,
                 { headers: ["List-Unsubscribe", "List-Unsubscribe-Post"], bodyParts: ["TEXT"] },
@@ -437,7 +571,7 @@ export const makeICloudService = (
             },
             catch: mailError(`Failed to retrieve unsubscribe headers for iCloud message ${messageId}`),
           }),
-        { readOnly: true },
+        { mailbox, readOnly: true },
       )
 
       if (message === undefined) {

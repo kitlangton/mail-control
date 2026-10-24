@@ -27,7 +27,7 @@
         "@types/mime-types": "^3.0.1",
         "@types/nodemailer": "^8.0.2",
         "effect": "catalog:",
-        "imapflow": "^2.9.1",
+        "imapflow": "2.9.1",
         "mime-types": "^3.0.2",
         "nodemailer": "^10.2.1",
         "react": "19.3.1",

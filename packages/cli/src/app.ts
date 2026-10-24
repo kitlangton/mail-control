@@ -94,6 +94,7 @@ const optionsFor = (
   return {
     ...base,
     ...(since !== undefined ? { since: since.sinceDate } : {}),
+    ...(scope === "search" && base.mailbox === undefined ? { inboxOnly: false } : {}),
   }
 }
 

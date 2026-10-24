@@ -1,5 +1,13 @@
+import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
-import { buildSearchCriteria, findUnsubscribeUrl, parseRawHeaders } from "../src/icloud.js"
+import {
+  buildSearchCriteria,
+  findUnsubscribeUrl,
+  formatICloudMessageId,
+  parseICloudMessageId,
+  parseRawHeaders,
+} from "../src/icloud.js"
+import { MailError } from "../src/types.js"
 
 describe("parseRawHeaders", () => {
   it("parses simple header lines", () => {
@@ -67,5 +75,45 @@ describe("buildSearchCriteria", () => {
       since: new Date("2026-10-22T12:00:00.000Z"),
       or: [{ subject: "invoice" }, { from: "invoice" }],
     })
+  })
+
+  it("combines repeated from: operators and treats m as months in newer_than:/older_than:", () => {
+    expect(buildSearchCriteria({ query: "from:alice@example.com OR from:bob@example.com newer_than:3m" }, now)).toEqual(
+      {
+        since: new Date("2026-07-26T12:00:00.000Z"),
+        or: [{ from: "alice@example.com" }, { from: "bob@example.com" }],
+      },
+    )
+  })
+
+  it("throws MailError on unknown operators or invalid operator values", () => {
+    expect(() => buildSearchCriteria({ query: "label:work" }, now)).toThrow(MailError)
+    expect(() => buildSearchCriteria({ query: "has:attachment" }, now)).toThrow(MailError)
+    expect(() => buildSearchCriteria({ query: "is:starred" }, now)).toThrow(MailError)
+    expect(() => buildSearchCriteria({ query: "newer_than:xyz" }, now)).toThrow(MailError)
+  })
+})
+
+describe("iCloud message IDs", () => {
+  it("formats INBOX as bare UID and non-INBOX with mailbox prefix", () => {
+    expect(formatICloudMessageId("INBOX", 1370)).toBe("1370")
+    expect(formatICloudMessageId("Archive", 1370)).toBe("Archive:1370")
+    expect(formatICloudMessageId("Sent Messages", 42)).toBe("Sent Messages:42")
+  })
+
+  it("parses both bare UIDs and mailbox-prefixed IDs", async () => {
+    await expect(Effect.runPromise(parseICloudMessageId("1370"))).resolves.toEqual({
+      mailbox: "INBOX",
+      uid: 1370,
+    })
+    await expect(Effect.runPromise(parseICloudMessageId("Archive:1370"))).resolves.toEqual({
+      mailbox: "Archive",
+      uid: 1370,
+    })
+    await expect(Effect.runPromise(parseICloudMessageId("Sent Messages:42"))).resolves.toEqual({
+      mailbox: "Sent Messages",
+      uid: 42,
+    })
+    await expect(Effect.runPromise(parseICloudMessageId("Archive:not-a-uid"))).rejects.toBeInstanceOf(MailError)
   })
 })

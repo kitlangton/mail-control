@@ -26,7 +26,8 @@ directory with `MAIL_CONTROL_DIR`). Each account has an id (the map key) and a
 - `all` is the default for `list`, `search`, and `recent`; use a concrete id for single-message mutations.
 - Discover configured ids by reading `config.json` or running a command and seeing the `[id]` tags in output.
 - Capabilities depend on type: Gmail supports every command, including `filters`; iCloud supports read, send, archive, trash, mark-read, and unsubscribe.
-- On iCloud, `search` and `list -q` translate Gmail-style operators (`from:`, `to:`, `subject:`, `is:unread`, `is:read`, `newer_than:`, `older_than:`) into IMAP search criteria.
+- On iCloud, `recent` and `search` (when `--mailbox` is omitted) search both `INBOX` and `Archive` and return mailbox-qualified IDs (`Archive:1370`; bare UIDs mean `INBOX`), which `read`, `archive`, `trash`, `mark-read`, and `unsubscribe` accept directly.
+- On iCloud, `search` and `list -q` translate Gmail-style operators (`from:`, `to:`, `subject:`, `is:unread`, `is:read`, `newer_than:`, `older_than:`, with `m` = months) into IMAP search criteria and fail on unsupported operators.
 - For iCloud mailbox-specific reads/lists/searches, pass `--mailbox <name>` (e.g. `"Sent Messages"`, `Archive`).
 
 ## Credentials
